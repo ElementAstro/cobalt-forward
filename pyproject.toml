@@ -1,0 +1,93 @@
+[project]
+name = "cobalt-forward"
+version = "0.1.0"
+description = "A high-performance TCP-WebSocket forwarder with command dispatching capabilities"
+requires-python = ">=3.10,<4.0"
+authors = [{ name = "Max Qian", email = "astro_air@126.com" }]
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "websockets>=12.0",
+    "typer>=0.9.0",
+    "pyyaml>=6.0.1",
+    "python-dotenv>=1.0.0",
+    "loguru>=0.7.2",
+    "psutil>=5.9.6",
+    "aiocache>=0.12.2",
+    "pydantic>=2.4.2",
+    "typing-extensions>=4.8.0",
+    "asyncio>=3.4.3",
+    "aiohttp>=3.9.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.3",
+    "pytest-asyncio>=0.21.1",
+    "pytest-cov>=4.1.0",
+    "black>=23.11.0",
+    "isort>=5.12.0",
+    "mypy>=1.7.1",
+    "ruff>=0.1.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.black]
+line-length = 88
+target-version = ["py310"]
+include = '\.pyi?$'
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+line_length = 88
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q --cov=cobalt_forward"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["cobalt_forward"]
+omit = ["tests/*"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "UP", # pyupgrade
+]
+ignore = [
+    "E501", # line too long, handled by black
+    "B008", # do not perform function calls in argument defaults
+]
+
+[project.scripts]
+cobalt-forward = "cobalt_forward.main:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cobalt_forward"]
