@@ -7,7 +7,10 @@ import os
 from dotenv import load_dotenv
 from loguru import logger
 from dataclasses import dataclass
+from fastapi import FastAPI
+import time
 
+from app.config_manager import ConfigManager
 from server import app, EnhancedForwarderConfig
 from logger_config import setup_logging
 
@@ -83,6 +86,28 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
     return AppConfig(**config)
 
 
+def create_app(config_path: str) -> FastAPI:
+    """创建FastAPI应用并配置热重载"""
+    config = load_config(config_path)
+    app = FastAPI()
+
+    # 初始化配置管理器
+    config_manager = ConfigManager(config_path)
+    app.state.config_manager = config_manager
+
+    if config.development_mode:
+        # 在开发模式下启用热重载
+        config_manager.start_hot_reload()
+        logger.info("已启用配置热重载支持")
+
+    @app.on_event("shutdown")
+    async def shutdown_event():
+        config_manager.stop_hot_reload()
+        logger.info("应用关闭，停止配置热重载")
+
+    return app
+
+
 @cli.command()
 def start(
     config_file: str = typer.Option(None, "--config", "-c", help="配置文件路径"),
@@ -142,6 +167,34 @@ def start(
             port=config.websocket_port,
             log_level="info"
         )
+
+
+@cli.command()
+def dev(
+    config_file: str = typer.Option("config.yaml", "--config", "-c"),
+    reload: bool = typer.Option(True, "--reload/--no-reload"),
+    port: int = typer.Option(8000, "--port", "-p")
+):
+    """以开发模式运行服务器"""
+    config = load_config(config_file)
+    config.development_mode = True
+
+    # 配置 uvicorn 的重载选项
+    uvicorn_config = {
+        "app": "main:create_app('{}')".format(config_file),
+        "host": config.websocket_host,
+        "port": port,
+        "reload": reload,
+        "reload_dirs": ["app"],
+        "reload_delay": 0.25,
+        "log_level": "debug"
+    }
+
+    logger.info(f"正在以开发模式启动服务器，端口: {port}")
+    if reload:
+        logger.info("代码热重载已启用")
+
+    uvicorn.run(**uvicorn_config)
 
 
 @cli.command()

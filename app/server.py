@@ -1,8 +1,9 @@
+from dataclasses import asdict
 import time
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
-from typing import Dict, Set, Optional, List
+from typing import Any, Dict, Set, Optional, List
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -12,6 +13,7 @@ from logger_config import setup_logging
 from performance_monitor import PerformanceMonitor
 from fastapi.responses import JSONResponse
 from aiocache import Cache
+from config_manager import ConfigManager
 
 # Import required components
 from tcp_client import ClientConfig
@@ -116,6 +118,7 @@ class EnhancedTCPWebSocketForwarder:
         self.scheduled_tasks: Dict[str, asyncio.Task] = {}
         self.performance_monitor = PerformanceMonitor()
         self.cache = Cache(Cache.MEMORY)
+        self._config_subscriber = None
 
     async def initialize(self):
         """Initialize components with enhanced monitoring"""
@@ -153,6 +156,10 @@ class EnhancedTCPWebSocketForwarder:
         logger.info(
             "Enhanced forwarder initialized with performance monitoring")
 
+        # 注册配置更新处理
+        self._config_subscriber = self._handle_config_update
+        app.state.config_manager.register_observer(self._config_subscriber)
+
     async def _run_scheduler(self):
         while True:
             now = datetime.now()
@@ -162,8 +169,33 @@ class EnhancedTCPWebSocketForwarder:
                     del self.scheduled_tasks[task_id]
             await asyncio.sleep(1)
 
+    async def _handle_config_update(self, new_config: Any):
+        """处理配置更新"""
+        logger.info("正在应用新的配置...")
+        try:
+            # 更新TCP客户端配置
+            if self.tcp_client:
+                # 重新连接TCP客户端
+                await self.tcp_client.disconnect()
+                self.tcp_client = MessageBusEnabledTCPClient(ClientConfig(
+                    host=new_config.tcp_host,
+                    port=new_config.tcp_port,
+                    timeout=new_config.tcp_timeout,
+                    retry_attempts=new_config.tcp_retry_attempts
+                ))
+                await self.tcp_client.connect()
+
+            # 更新其他组件配置
+            self.performance_monitor.update_config(new_config)
+            logger.success("配置更新完成")
+        except Exception as e:
+            logger.error(f"配置更新失败: {e}")
+
     async def shutdown(self):
         """Graceful shutdown with cleanup"""
+        if self._config_subscriber:
+            app.state.config_manager.unregister_observer(
+                self._config_subscriber)
         await self.performance_monitor.stop()
         await self.cache.clear()
         if self.tcp_client:
@@ -268,3 +300,65 @@ async def get_cache_stats():
     except Exception as e:
         logger.error(f"Error getting cache stats: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# Add new routes for configuration management
+
+
+@app.post("/api/config")
+async def update_config(config_updates: dict = Body(...)):
+    """Update server configuration"""
+    try:
+        await app.state.config_manager.update_config(config_updates)
+        return {"status": "success", "message": "Configuration updated"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/config")
+async def get_config():
+    """Get current server configuration"""
+    return JSONResponse(content=asdict(app.state.config_manager.runtime_config))
+
+
+@app.post("/api/reload")
+async def reload_server():
+    """Trigger server reload"""
+    try:
+        await app.state.forwarder.reload()
+        return {"status": "success", "message": "Server reloaded"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Add health check endpoint
+
+
+@app.get("/health")
+async def health_check():
+    """Server health check"""
+    metrics = app.forwarder.performance_monitor.get_current_metrics()
+    return {
+        "status": "healthy",
+        "uptime": time.time() - app.state.start_time,
+        "metrics": metrics.__dict__
+    }
+
+# Add debugging endpoints
+
+
+@app.get("/api/debug/connections")
+async def get_connections():
+    """Get current connection information"""
+    return {
+        "active_websockets": len(app.forwarder.manager.active_connections),
+        "tcp_state": app.forwarder.tcp_client.state.value
+    }
+
+
+@app.post("/api/debug/simulate_error")
+async def simulate_error():
+    """Endpoint for testing error handling"""
+    if not app.state.config_manager.runtime_config.development_mode:
+        raise HTTPException(
+            status_code=403, detail="Only available in development mode")
+    # Simulate an error condition
+    raise Exception("Simulated error for testing")
