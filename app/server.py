@@ -9,6 +9,9 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
 import uuid
+from app.commands import BulkOperationCommand, DataQueryCommand, DeviceControlCommand, SystemConfigCommand
+from app.message_transformer import CompressionTransform, MessageEnricher, MessageValidator
+from app.protocol_converter import MQTTConverter, ModbusConverter
 from logger_config import setup_logging
 from performance_monitor import PerformanceMonitor
 from fastapi.responses import JSONResponse
@@ -138,6 +141,25 @@ class EnhancedTCPWebSocketForwarder:
             self.tcp_client.message_bus)
         await self.command_transmitter.register_handler(UserCommand, UserCommandHandler())
 
+        # Register command handlers
+        from commands import (
+            DeviceControlCommand, DeviceControlHandler,
+            DataQueryCommand, DataQueryHandler,
+            SystemConfigCommand, SystemConfigHandler,
+            BulkOperationCommand, BulkOperationHandler
+        )
+
+        await self.command_transmitter.register_handler(
+            DeviceControlCommand, DeviceControlHandler())
+        await self.command_transmitter.register_handler(
+            DataQueryCommand, DataQueryHandler())
+        await self.command_transmitter.register_handler(
+            SystemConfigCommand, SystemConfigHandler())
+        await self.command_transmitter.register_handler(
+            BulkOperationCommand, BulkOperationHandler())
+
+        logger.info("Command handlers registered successfully")
+
         # Initialize connection manager
         self.manager = EnhancedConnectionManager(
             self.tcp_client.message_bus,
@@ -159,6 +181,24 @@ class EnhancedTCPWebSocketForwarder:
         # 注册配置更新处理
         self._config_subscriber = self._handle_config_update
         app.state.config_manager.register_observer(self._config_subscriber)
+
+        # 启用TCP客户端高级功能
+        await self.tcp_client.enable_compression()
+        await self.tcp_client.start_heartbeat(interval=30.0)
+        await self.tcp_client.enable_auto_reconnect()
+
+        # 添加协议转换器
+        self.protocol_converters = {
+            'modbus': ModbusConverter(),
+            'mqtt': MQTTConverter()
+        }
+
+        # 添加消息转换器
+        self.message_transforms = [
+            CompressionTransform(),
+            MessageValidator(),
+            MessageEnricher()
+        ]
 
     async def _run_scheduler(self):
         while True:
@@ -201,6 +241,30 @@ class EnhancedTCPWebSocketForwarder:
         if self.tcp_client:
             await self.tcp_client.disconnect()
         logger.info("Enhanced forwarder shutdown completed")
+
+    async def forward_message(self, message: Dict[str, Any], protocol: str = None):
+        """增强的消息转发"""
+        try:
+            # 应用消息转换
+            for transform in self.message_transforms:
+                message = await transform.transform(message)
+
+            # 协议转换
+            if protocol and protocol in self.protocol_converters:
+                converter = self.protocol_converters[protocol]
+                wire_data = await converter.to_wire_format(message)
+            else:
+                wire_data = json.dumps(message).encode()
+
+            # 发送数据
+            await self.tcp_client.send_with_retry(wire_data)
+            
+            # 更新性能指标
+            self.performance_monitor.record_forward()
+
+        except Exception as e:
+            logger.error(f"Message forward error: {e}")
+            raise
 
 # Update FastAPI application setup
 
@@ -362,3 +426,49 @@ async def simulate_error():
             status_code=403, detail="Only available in development mode")
     # Simulate an error condition
     raise Exception("Simulated error for testing")
+
+# 添加新的API端点用于命令处理
+
+
+@app.post("/api/device/control")
+async def device_control(command_data: Dict[str, Any]):
+    """设备控制接口"""
+    try:
+        command = DeviceControlCommand(command_data)
+        result = await app.forwarder.command_transmitter.send(command)
+        return result.result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/data/query")
+async def data_query(query_data: Dict[str, Any]):
+    """数据查询接口"""
+    try:
+        command = DataQueryCommand(query_data)
+        result = await app.forwarder.command_transmitter.send(command)
+        return result.result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/system/config")
+async def system_config(config_data: Dict[str, Any]):
+    """系统配置接口"""
+    try:
+        command = SystemConfigCommand(config_data)
+        result = await app.forwarder.command_transmitter.send(command)
+        return result.result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/bulk/operation")
+async def bulk_operation(operation_data: Dict[str, Any]):
+    """批量操作接口"""
+    try:
+        command = BulkOperationCommand(operation_data)
+        result = await app.forwarder.command_transmitter.send(command)
+        return result.result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))

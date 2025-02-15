@@ -4,6 +4,9 @@ from typing import Optional, Callable, Any
 from enum import Enum, auto
 from loguru import logger
 
+from app.utils.error_handler import CircuitBreaker
+from app.utils.performance import RateLimiter, async_performance_monitor
+
 
 @dataclass
 class ClientConfig:
@@ -37,6 +40,22 @@ class TCPClient:
             'message': [],
             'error': []
         }
+        self._buffer = bytearray()
+        self._packet_queue = asyncio.Queue()
+        self._heartbeat_task = None
+        self._reconnect_task = None
+        self._compression_enabled = False
+        self._buffer_size = 64 * 1024  # 64KB buffer
+        self._stats = {
+            'bytes_sent': 0,
+            'bytes_received': 0,
+            'packets_sent': 0,
+            'packets_received': 0,
+            'errors': 0,
+            'reconnects': 0
+        }
+        self._rate_limiter = RateLimiter(rate_limit=1000)  # 限制每秒1000个请求
+        self._circuit_breaker = CircuitBreaker()
         logger.info(f"Initializing TCP client for {config.host}:{config.port}")
         logger.debug(f"Client configuration: {config}")
 
@@ -112,23 +131,26 @@ class TCPClient:
                 self._writer = None
                 logger.debug("Client resources cleaned up")
 
+    @async_performance_monitor()
     async def send(self, data: bytes) -> None:
-        """Send data to the server"""
-        if not self._writer or self._state != ClientState.CONNECTED:
-            logger.error("Attempted to send data while not connected")
-            raise ConnectionError("Not connected to server")
+        """Send data with rate limiting and circuit breaker"""
+        if not await self._rate_limiter.acquire():
+            raise Exception("Rate limit exceeded")
 
-        try:
-            logger.debug(f"Sending {len(data)} bytes")
-            logger.trace(f"Data: {data}")
-            self._writer.write(data)
-            await self._writer.drain()
-            logger.debug("Data sent successfully")
-        except Exception as e:
-            self._state = ClientState.ERROR
-            self._trigger_callback('error', e)
-            logger.exception("Error sending data")
-            raise
+        async def _protected_send():
+            if not self._writer or self._state != ClientState.CONNECTED:
+                raise ConnectionError("Not connected to server")
+
+            try:
+                self._writer.write(data)
+                await self._writer.drain()
+                self._stats['bytes_sent'] += len(data)
+                self._stats['packets_sent'] += 1
+            except Exception as e:
+                self._stats['errors'] += 1
+                raise
+
+        await self._circuit_breaker.execute(_protected_send)
 
     async def receive(self, buffer_size: int = 1024) -> bytes:
         """Receive data from the server"""
@@ -172,3 +194,86 @@ class TCPClient:
                 logger.trace(f"Successfully executed callback for {event}")
             except Exception as e:
                 logger.error(f"Callback error for event {event}: {str(e)}")
+
+    async def enable_compression(self, enabled: bool = True):
+        """启用或禁用数据压缩"""
+        self._compression_enabled = enabled
+        logger.info(f"Data compression {'enabled' if enabled else 'disabled'}")
+
+    async def start_heartbeat(self, interval: float = 30.0):
+        """启动心跳检测"""
+        async def heartbeat_loop():
+            while self._state == ClientState.CONNECTED:
+                try:
+                    await self.send(b'ping')
+                    await asyncio.sleep(interval)
+                except Exception as e:
+                    logger.error(f"Heartbeat error: {e}")
+                    await self._handle_connection_failure(0, e)
+                    break
+
+        self._heartbeat_task = asyncio.create_task(heartbeat_loop())
+        logger.info(f"Heartbeat started with interval {interval}s")
+
+    async def send_with_retry(self, data: bytes, max_retries: int = 3) -> bool:
+        """发送数据并自动重试"""
+        for attempt in range(max_retries):
+            try:
+                await self.send(data)
+                return True
+            except Exception as e:
+                logger.warning(f"Send attempt {attempt + 1} failed: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1 * (attempt + 1))
+                continue
+        return False
+
+    @async_performance_monitor()
+    async def receive_packet(self) -> Optional[bytes]:
+        """Enhanced packet receiving with performance monitoring"""
+        try:
+            packet = await super().receive_packet()
+            if packet:
+                self._stats['packets_received'] += 1
+            return packet
+        except Exception as e:
+            self._stats['errors'] += 1
+            raise
+
+    def get_stats(self) -> dict:
+        """获取连接统计信息"""
+        return self._stats.copy()
+
+    async def send_file(self, file_path: str, chunk_size: int = 8192) -> None:
+        """发送文件"""
+        try:
+            with open(file_path, 'rb') as f:
+                while True:
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
+                    await self.send(chunk)
+                    self._stats['bytes_sent'] += len(chunk)
+        except Exception as e:
+            logger.error(f"Error sending file {file_path}: {e}")
+            raise
+
+    async def enable_auto_reconnect(self, enabled: bool = True):
+        """启用自动重连"""
+        if enabled and not self._reconnect_task:
+            async def reconnect_loop():
+                while True:
+                    if self._state == ClientState.DISCONNECTED:
+                        try:
+                            await self.connect()
+                            self._stats['reconnects'] += 1
+                        except Exception as e:
+                            logger.error(f"Reconnection failed: {e}")
+                    await asyncio.sleep(5)
+
+            self._reconnect_task = asyncio.create_task(reconnect_loop())
+            logger.info("Auto reconnect enabled")
+        elif not enabled and self._reconnect_task:
+            self._reconnect_task.cancel()
+            self._reconnect_task = None
+            logger.info("Auto reconnect disabled")

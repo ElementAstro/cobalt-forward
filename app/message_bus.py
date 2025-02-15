@@ -7,6 +7,8 @@ import uuid
 from enum import Enum
 from abc import ABC, abstractmethod
 
+from app.utils.error_handler import CircuitBreaker
+from app.utils.performance import RateLimiter, async_performance_monitor
 from tcp_client import ClientConfig, TCPClient
 
 T = TypeVar('T')
@@ -86,6 +88,10 @@ class MessageBus:
         self._tcp_client.on('message', self._handle_tcp_message)
         self._tcp_client.on('error', self._handle_tcp_error)
 
+        self._message_queue = asyncio.Queue(maxsize=1000)  # 限制队列大小
+        self._rate_limiter = RateLimiter(rate_limit=500)  # 限制每秒500条消息
+        self._circuit_breaker = CircuitBreaker()
+
     async def start(self):
         """Start the message bus"""
         self._running = True
@@ -98,18 +104,26 @@ class MessageBus:
             await self._processing_task
             self._processing_task = None
 
+    @async_performance_monitor()
     async def publish(self, topic: str, data: Any, message_type: MessageType = MessageType.EVENT) -> None:
-        """Publish a message to a topic"""
-        message = Message(
-            id=str(uuid.uuid4()),
-            type=message_type,
-            topic=topic,
-            data=data,
-            metadata={'timestamp': asyncio.get_event_loop().time()}
-        )
+        """Enhanced publish with rate limiting and circuit breaker"""
+        if not await self._rate_limiter.acquire():
+            raise Exception("Message rate limit exceeded")
 
-        await self._tcp_client.send(self._serializer.serialize(message))
-        self._message_count += 1
+        async def _protected_publish():
+            message = Message(
+                id=str(uuid.uuid4()),
+                type=message_type,
+                topic=topic,
+                data=data,
+                metadata={'timestamp': asyncio.get_event_loop().time()}
+            )
+            
+            await self._message_queue.put(message)
+            await self._tcp_client.send(self._serializer.serialize(message))
+            self._message_count += 1
+
+        await self._circuit_breaker.execute(_protected_publish)
 
     async def request(self, topic: str, data: Any, timeout: float = 30.0) -> Any:
         """Send a request and wait for response"""
