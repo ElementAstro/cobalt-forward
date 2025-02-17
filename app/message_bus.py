@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 
 from app.utils.error_handler import CircuitBreaker
 from app.utils.performance import RateLimiter, async_performance_monitor
-from tcp_client import ClientConfig, TCPClient
+from app.client.tcp_client import ClientConfig, TCPClient
 
 T = TypeVar('T')
 

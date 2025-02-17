@@ -2,7 +2,7 @@ import pytest
 from unittest.mock import Mock, AsyncMock, patch, call
 import asyncio
 import logging
-from app.tcp_client import TCPClient, ClientConfig, ClientState
+from app.client.tcp_client import TCPClient, ClientConfig, ClientState
 
 # filepath: /D:/Project/cobalt-forward-1/app/test_tcp_client.py
 

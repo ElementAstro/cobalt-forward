@@ -1,6 +1,9 @@
+from app.routers import plugin
+from app.routers import websocket, commands, system
 from dataclasses import asdict
+import ssl
 import time
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Body
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Body, Query
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 from typing import Any, Dict, Set, Optional, List
@@ -10,16 +13,19 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 import uuid
 from app.commands import BulkOperationCommand, DataQueryCommand, DeviceControlCommand, SystemConfigCommand
+from app.event_bus import Event, EventBus, EventPriority
 from app.message_transformer import CompressionTransform, MessageEnricher, MessageValidator
+from app.middleware import ErrorHandlerMiddleware, PerformanceMiddleware, SecurityMiddleware
+from app.plugin_system import PluginManager
 from app.protocol_converter import MQTTConverter, ModbusConverter
+from app.utils.performance import PerformanceMonitor
 from logger_config import setup_logging
-from performance_monitor import PerformanceMonitor
 from fastapi.responses import JSONResponse
 from aiocache import Cache
 from config_manager import ConfigManager
 
 # Import required components
-from tcp_client import ClientConfig
+from app.client.tcp_client import ClientConfig
 from message_bus import MessageBusEnabledTCPClient, MessageBus, Message, MessageType
 from command_dispatcher import CommandTransmitter, UserCommand, UserCommandHandler, ScheduledCommand, BatchCommand
 from message_processor import MessageTransformer, MessageFilter, json_payload_transformer
@@ -38,6 +44,16 @@ class EnhancedForwarderConfig:
     tcp_retry_attempts: int = 3
     enable_command_handling: bool = True
     command_timeout: float = 30.0
+    mqtt_enabled: bool = False
+    mqtt_host: str = "localhost"
+    mqtt_port: int = 1883
+    mqtt_username: str = None
+    mqtt_password: str = None
+    mqtt_topics: List[str] = []
+    websocket_enabled: bool = True
+    websocket_ssl: bool = False
+    websocket_cert: str = None
+    websocket_key: str = None
 
 
 class EnhancedConnectionManager:
@@ -122,6 +138,11 @@ class EnhancedTCPWebSocketForwarder:
         self.performance_monitor = PerformanceMonitor()
         self.cache = Cache(Cache.MEMORY)
         self._config_subscriber = None
+        self.mqtt_client = None
+        self.websocket_client = None
+        self.protocol_handlers = {}
+        self.event_bus = EventBus()
+        self.plugin_manager = PluginManager()
 
     async def initialize(self):
         """Initialize components with enhanced monitoring"""
@@ -200,6 +221,74 @@ class EnhancedTCPWebSocketForwarder:
             MessageEnricher()
         ]
 
+        # 初始化MQTT客户端
+        if self.config.mqtt_enabled:
+            from app.client.mqtt_client import MQTTConfig, MQTTClient
+            mqtt_config = MQTTConfig(
+                broker=self.config.mqtt_host,
+                port=self.config.mqtt_port,
+                client_id=f"cobalt-forward-{uuid.uuid4().hex[:8]}",
+                username=self.config.mqtt_username,
+                password=self.config.mqtt_password
+            )
+            self.mqtt_client = MQTTClient(mqtt_config)
+            self.mqtt_client.connect()
+
+            # 订阅配置的主题
+            for topic in self.config.mqtt_topics:
+                self.mqtt_client.subscribe(topic, self._handle_mqtt_message)
+
+            logger.info("MQTT client initialized and connected")
+
+        # 初始化WebSocket客户端（如果需要外部WebSocket连接）
+        if self.config.websocket_enabled:
+            from app.client.websocket_client import WebSocketConfig, WebSocketClient
+            ws_config = WebSocketConfig(
+                uri=f"{'wss' if self.config.websocket_ssl else 'ws'}://{self.config.websocket_host}:{self.config.websocket_port}",
+                ssl_context=self._create_ssl_context() if self.config.websocket_ssl else None,
+                auto_reconnect=True
+            )
+            self.websocket_client = WebSocketClient(ws_config)
+            self.websocket_client.add_callback(
+                'message', self._handle_ws_message)
+            await self.websocket_client.connect()
+            logger.info("WebSocket client initialized and connected")
+
+        # 注册协议处理器
+        self.protocol_handlers = {
+            'mqtt': self._handle_mqtt_protocol,
+            'ws': self._handle_ws_protocol,
+            'tcp': self._handle_tcp_protocol
+        }
+
+        # 启动事件总线
+        await self.event_bus.start()
+        logger.info("Event bus started")
+
+        # 加载插件
+        await self.plugin_manager.load_plugins()
+        logger.info("Plugins loaded")
+
+        # 注册事件处理器
+        self.event_bus.subscribe(
+            "message.received", self._handle_message_event)
+        self.event_bus.subscribe("client.connected", self._handle_client_event)
+        self.event_bus.subscribe(
+            "error.occurred", self._handle_error_event, EventPriority.HIGH)
+
+        # 初始化插件系统
+        app.state.plugin_manager = self.plugin_manager
+        app.state.event_bus = self.event_bus
+
+        # 启动插件配置监视
+        await self.plugin_manager.start_plugin_watcher()
+
+        # 注册插件事件处理器
+        for plugin in self.plugin_manager.plugins.values():
+            for event_name, handlers in plugin._event_handlers.items():
+                for handler in handlers:
+                    self.event_bus.subscribe(event_name, handler)
+
     async def _run_scheduler(self):
         while True:
             now = datetime.now()
@@ -240,31 +329,112 @@ class EnhancedTCPWebSocketForwarder:
         await self.cache.clear()
         if self.tcp_client:
             await self.tcp_client.disconnect()
+        if self.mqtt_client:
+            self.mqtt_client.disconnect()
+        if self.websocket_client:
+            await self.websocket_client.close_connection()
+        await self.event_bus.stop()
+        await self.plugin_manager.shutdown_plugins()
         logger.info("Enhanced forwarder shutdown completed")
 
     async def forward_message(self, message: Dict[str, Any], protocol: str = None):
         """增强的消息转发"""
         try:
+            start_time = time.perf_counter()
             # 应用消息转换
             for transform in self.message_transforms:
                 message = await transform.transform(message)
 
-            # 协议转换
+            # 协议转换与发送数据
             if protocol and protocol in self.protocol_converters:
                 converter = self.protocol_converters[protocol]
                 wire_data = await converter.to_wire_format(message)
             else:
                 wire_data = json.dumps(message).encode()
 
-            # 发送数据
             await self.tcp_client.send_with_retry(wire_data)
-            
-            # 更新性能指标
+
+            # 记录性能指标
+            latency = (time.perf_counter() - start_time) * 1000  # 转换为毫秒
+            self.performance_monitor.record_message(latency)
             self.performance_monitor.record_forward()
 
         except Exception as e:
+            self.performance_monitor.record_error()
             logger.error(f"Message forward error: {e}")
             raise
+
+    async def _handle_mqtt_message(self, topic: str, payload: Any):
+        """处理来自MQTT的消息"""
+        try:
+            message = {
+                'protocol': 'mqtt',
+                'topic': topic,
+                'payload': payload,
+                'timestamp': time.time()
+            }
+            await self.forward_message(message, protocol='mqtt')
+        except Exception as e:
+            logger.error(f"Error handling MQTT message: {e}")
+
+    async def _handle_ws_message(self, message: Any):
+        """处理来自WebSocket的消息"""
+        try:
+            if isinstance(message, str):
+                message = json.loads(message)
+            await self.forward_message(message, protocol='ws')
+        except Exception as e:
+            logger.error(f"Error handling WebSocket message: {e}")
+
+    async def _handle_tcp_protocol(self, message: Dict[str, Any]) -> bytes:
+        """处理TCP协议消息"""
+        return json.dumps(message).encode()
+
+    async def _handle_mqtt_protocol(self, message: Dict[str, Any]) -> bytes:
+        """处理MQTT协议消息"""
+        if self.mqtt_client and 'topic' in message:
+            await self.mqtt_client.publish(message['topic'], message['payload'])
+        return json.dumps(message).encode()
+
+    async def _handle_ws_protocol(self, message: Dict[str, Any]) -> bytes:
+        """处理WebSocket协议消息"""
+        if self.websocket_client:
+            await self.websocket_client.send_message(message)
+        return json.dumps(message).encode()
+
+    def _create_ssl_context(self) -> Optional[ssl.SSLContext]:
+        """创建SSL上下文"""
+        if not self.config.websocket_ssl:
+            return None
+
+        import ssl
+        ssl_context = ssl.create_default_context()
+        if self.config.websocket_cert and self.config.websocket_key:
+            ssl_context.load_cert_chain(
+                self.config.websocket_cert,
+                self.config.websocket_key
+            )
+        return ssl_context
+
+    async def _handle_message_event(self, event: Event):
+        """处理消息事件"""
+        try:
+            message = event.data
+            protocol = message.get('protocol', 'tcp')
+            await self.forward_message(message, protocol)
+        except Exception as e:
+            logger.error(f"Error handling message event: {e}")
+            await self.event_bus.publish(Event("error.occurred", str(e)))
+
+    async def _handle_client_event(self, event: Event):
+        """处理客户端连接事件"""
+        client_info = event.data
+        logger.info(f"New client connected: {client_info}")
+
+    async def _handle_error_event(self, event: Event):
+        """处理错误事件"""
+        error_info = event.data
+        logger.error(f"Error occurred: {error_info}")
 
 # Update FastAPI application setup
 
@@ -293,107 +463,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 在app定义后添加路由注册
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """Enhanced WebSocket endpoint with performance monitoring"""
-    start_time = time.time()
-    await app.forwarder.manager.connect(websocket)
-    try:
-        while True:
-            message = await websocket.receive_text()
-            process_start = time.time()
-            await app.forwarder.manager.handle_client_message(websocket, message)
+app.include_router(websocket.router)
+app.include_router(commands.router)
+app.include_router(system.router)
+app.include_router(plugin.router)
 
-            # 记录性能指标
-            latency = (time.time() - process_start) * 1000  # 转换为毫秒
-            app.forwarder.performance_monitor.record_message(latency)
-
-    except WebSocketDisconnect:
-        end_time = time.time()
-        logger.info(
-            f"WebSocket connection duration: {end_time - start_time:.2f}s")
-        await app.forwarder.manager.disconnect(websocket)
-    except Exception as e:
-        logger.exception(f"WebSocket error: {e}")
-        raise
-
-
-@app.post("/schedule_command")
-async def schedule_command(command_data: dict):
-    try:
-        command = ScheduledCommand(command_data)
-        task = asyncio.create_task(
-            app.forwarder.command_transmitter.send(command))
-        task_id = str(uuid.uuid4())
-        app.forwarder.scheduled_tasks[task_id] = task
-        return {"task_id": task_id}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.post("/batch_command")
-async def batch_command(commands: List[dict]):
-    try:
-        command = BatchCommand(commands)
-        result = await app.forwarder.command_transmitter.send(command)
-        return result.result
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-# 添加新的API端点
-
-
-@app.get("/metrics")
-async def get_metrics():
-    """获取性能指标"""
-    try:
-        metrics = app.forwarder.performance_monitor.get_current_metrics()
-        return JSONResponse(content=metrics.__dict__)
-    except Exception as e:
-        logger.error(f"Error getting metrics: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/cache_stats")
-async def get_cache_stats():
-    """获取缓存统计信息"""
-    try:
-        stats = await app.forwarder.cache.raw.stats()
-        return JSONResponse(content=stats)
-    except Exception as e:
-        logger.error(f"Error getting cache stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Add new routes for configuration management
-
-
-@app.post("/api/config")
-async def update_config(config_updates: dict = Body(...)):
-    """Update server configuration"""
-    try:
-        await app.state.config_manager.update_config(config_updates)
-        return {"status": "success", "message": "Configuration updated"}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.get("/api/config")
-async def get_config():
-    """Get current server configuration"""
-    return JSONResponse(content=asdict(app.state.config_manager.runtime_config))
-
-
-@app.post("/api/reload")
-async def reload_server():
-    """Trigger server reload"""
-    try:
-        await app.state.forwarder.reload()
-        return {"status": "success", "message": "Server reloaded"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Add health check endpoint
+# 移除所有原有的路由处理函数
+# 保留以下基础路由
 
 
 @app.get("/health")
@@ -406,69 +484,13 @@ async def health_check():
         "metrics": metrics.__dict__
     }
 
-# Add debugging endpoints
 
-
-@app.get("/api/debug/connections")
-async def get_connections():
-    """Get current connection information"""
-    return {
-        "active_websockets": len(app.forwarder.manager.active_connections),
-        "tcp_state": app.forwarder.tcp_client.state.value
-    }
-
-
-@app.post("/api/debug/simulate_error")
-async def simulate_error():
-    """Endpoint for testing error handling"""
-    if not app.state.config_manager.runtime_config.development_mode:
-        raise HTTPException(
-            status_code=403, detail="Only available in development mode")
-    # Simulate an error condition
-    raise Exception("Simulated error for testing")
-
-# 添加新的API端点用于命令处理
-
-
-@app.post("/api/device/control")
-async def device_control(command_data: Dict[str, Any]):
-    """设备控制接口"""
+@app.get("/metrics")
+async def get_metrics():
+    """获取性能指标"""
     try:
-        command = DeviceControlCommand(command_data)
-        result = await app.forwarder.command_transmitter.send(command)
-        return result.result
+        metrics = app.forwarder.performance_monitor.get_current_metrics()
+        return JSONResponse(content=metrics.__dict__)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.post("/api/data/query")
-async def data_query(query_data: Dict[str, Any]):
-    """数据查询接口"""
-    try:
-        command = DataQueryCommand(query_data)
-        result = await app.forwarder.command_transmitter.send(command)
-        return result.result
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.post("/api/system/config")
-async def system_config(config_data: Dict[str, Any]):
-    """系统配置接口"""
-    try:
-        command = SystemConfigCommand(config_data)
-        result = await app.forwarder.command_transmitter.send(command)
-        return result.result
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.post("/api/bulk/operation")
-async def bulk_operation(operation_data: Dict[str, Any]):
-    """批量操作接口"""
-    try:
-        command = BulkOperationCommand(operation_data)
-        result = await app.forwarder.command_transmitter.send(command)
-        return result.result
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.error(f"Error getting metrics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
