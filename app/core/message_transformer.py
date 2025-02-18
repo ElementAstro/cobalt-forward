@@ -3,7 +3,7 @@ from datetime import datetime
 import zlib
 import json
 from typing import Any, Dict
-from message_bus import Message
+from app.core.message_bus import Message
 
 
 class MessageTransform(ABC):

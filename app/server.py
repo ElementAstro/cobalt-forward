@@ -13,11 +13,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 import uuid
 from app.commands import BulkOperationCommand, DataQueryCommand, DeviceControlCommand, SystemConfigCommand
-from app.event_bus import Event, EventBus, EventPriority
-from app.message_transformer import CompressionTransform, MessageEnricher, MessageValidator
-from app.middleware import ErrorHandlerMiddleware, PerformanceMiddleware, SecurityMiddleware
+from app.core.event_bus import Event, EventBus, EventPriority
+from app.core.message_transformer import CompressionTransform, MessageEnricher, MessageValidator
+from app.core.middleware import ErrorHandlerMiddleware, PerformanceMiddleware, SecurityMiddleware
 from app.plugin_system import PluginManager
-from app.protocol_converter import MQTTConverter, ModbusConverter
+from app.core.protocol_converter import MQTTConverter, ModbusConverter
 from app.utils.performance import PerformanceMonitor
 from logger_config import setup_logging
 from fastapi.responses import JSONResponse
@@ -26,9 +26,9 @@ from config_manager import ConfigManager
 
 # Import required components
 from app.client.tcp_client import ClientConfig
-from message_bus import MessageBusEnabledTCPClient, MessageBus, Message, MessageType
-from command_dispatcher import CommandTransmitter, UserCommand, UserCommandHandler, ScheduledCommand, BatchCommand
-from message_processor import MessageTransformer, MessageFilter, json_payload_transformer
+from app.core.message_bus import MessageBusEnabledTCPClient, MessageBus, Message, MessageType
+from app.core.command_dispatcher import CommandTransmitter, UserCommand, UserCommandHandler, ScheduledCommand, BatchCommand
+from app.core.message_processor import MessageTransformer, MessageFilter, json_payload_transformer
 
 # 设置日志
 logger = setup_logging()

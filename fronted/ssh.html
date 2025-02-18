@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SSH Web Terminal</title>
+    <style>
+        :root {
+            --terminal-bg: #1e1e1e;
+            --terminal-text: #f0f0f0;
+            --terminal-prompt: #4CAF50;
+            --terminal-error: #ff5555;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Courier New', Courier, monospace;
+            background-color: #2b2b2b;
+            color: var(--terminal-text);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 20px auto;
+            padding: 0 20px;
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .connection-panel {
+            background-color: #333;
+            padding: 20px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            color: #ccc;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #555;
+            background-color: #444;
+            color: var(--terminal-text);
+            border-radius: 3px;
+        }
+
+        .button {
+            padding: 8px 15px;
+            background-color: var(--terminal-prompt);
+            color: white;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+
+        .button:hover {
+            background-color: #45a049;
+        }
+
+        .button:disabled {
+            background-color: #666;
+            cursor: not-allowed;
+        }
+
+        .terminal {
+            background-color: var(--terminal-bg);
+            padding: 20px;
+            border-radius: 5px;
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 400px;
+        }
+
+        .terminal-output {
+            flex-grow: 1;
+            overflow-y: auto;
+            margin-bottom: 10px;
+            white-space: pre-wrap;
+            line-height: 1.4;
+        }
+
+        .terminal-input-container {
+            display: flex;
+            align-items: center;
+        }
+
+        .terminal-prompt {
+            color: var(--terminal-prompt);
+            margin-right: 10px;
+        }
+
+        .terminal-input {
+            flex-grow: 1;
+            background: none;
+            border: none;
+            color: var(--terminal-text);
+            font-family: inherit;
+            font-size: inherit;
+            outline: none;
+        }
+
+        .status-bar {
+            padding: 5px 10px;
+            background-color: #333;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 10px;
+            border-radius: 3px;
+        }
+
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 5px;
+        }
+
+        .status-connected {
+            background-color: var(--terminal-prompt);
+        }
+
+        .status-disconnected {
+            background-color: var(--terminal-error);
+        }
+
+        .error {
+            color: var(--terminal-error);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="connection-panel">
+            <div class="form-group">
+                <label for="hostname">Hostname</label>
+                <input type="text" id="hostname" placeholder="example.com">
+            </div>
+            <div class="form-group">
+                <label for="username">Username</label>
+                <input type="text" id="username" placeholder="username">
+            </div>
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" placeholder="password">
+            </div>
+            <div class="form-group">
+                <label for="port">Port</label>
+                <input type="number" id="port" value="22">
+            </div>
+            <button id="connectBtn" class="button">Connect</button>
+            <button id="disconnectBtn" class="button" disabled>Disconnect</button>
+        </div>
+
+        <div class="terminal">
+            <div id="terminalOutput" class="terminal-output"></div>
+            <div class="terminal-input-container">
+                <span class="terminal-prompt">$</span>
+                <input type="text" id="terminalInput" class="terminal-input" placeholder="Enter command..." disabled>
+            </div>
+        </div>
+
+        <div class="status-bar">
+            <div>
+                <span id="statusIndicator" class="status-indicator status-disconnected"></span>
+                <span id="statusText">Disconnected</span>
+            </div>
+            <div id="connectionInfo"></div>
+        </div>
+    </div>
+
+    <script>
+        class SSHTerminal {
+            constructor() {
+                this.ws = null;
+                this.connected = false;
+                this.initializeElements();
+                this.bindEvents();
+            }
+
+            initializeElements() {
+                // 连接面板元素
+                this.hostnameInput = document.getElementById('hostname');
+                this.usernameInput = document.getElementById('username');
+                this.passwordInput = document.getElementById('password');
+                this.portInput = document.getElementById('port');
+                this.connectBtn = document.getElementById('connectBtn');
+                this.disconnectBtn = document.getElementById('disconnectBtn');
+
+                // 终端元素
+                this.terminalOutput = document.getElementById('terminalOutput');
+                this.terminalInput = document.getElementById('terminalInput');
+                this.statusIndicator = document.getElementById('statusIndicator');
+                this.statusText = document.getElementById('statusText');
+                this.connectionInfo = document.getElementById('connectionInfo');
+            }
+
+            bindEvents() {
+                this.connectBtn.addEventListener('click', () => this.connect());
+                this.disconnectBtn.addEventListener('click', () => this.disconnect());
+                this.terminalInput.addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') {
+                        this.sendCommand(e.target.value);
+                        e.target.value = '';
+                    }
+                });
+            }
+
+            generateClientId() {
+                return 'client_' + Math.random().toString(36).substr(2, 9);
+            }
+
+            connect() {
+                const config = {
+                    hostname: this.hostnameInput.value,
+                    username: this.usernameInput.value,
+                    password: this.passwordInput.value,
+                    port: parseInt(this.portInput.value)
+                };
+
+                if (!config.hostname || !config.username || !config.password) {
+                    this.appendOutput('Error: Please fill in all required fields', 'error');
+                    return;
+                }
+
+                const clientId = this.generateClientId();
+                const wsUrl = `ws://localhost:8000/ws/ssh/${clientId}`;
+                this.ws = new WebSocket(wsUrl);
+
+                this.ws.onopen = () => {
+                    this.ws.send(JSON.stringify({
+                        type: 'connect',
+                        data: config
+                    }));
+                };
+
+                this.ws.onmessage = (event) => {
+                    const message = JSON.parse(event.data);
+                    this.handleMessage(message);
+                };
+
+                this.ws.onclose = () => {
+                    this.updateConnectionStatus(false);
+                    this.appendOutput('Connection closed');
+                };
+
+                this.ws.onerror = (error) => {
+                    this.appendOutput(`WebSocket error: ${error.message}`, 'error');
+                    this.updateConnectionStatus(false);
+                };
+            }
+
+            handleMessage(message) {
+                switch (message.type) {
+                    case 'connection_status':
+                        this.updateConnectionStatus(message.data.status === 'connected');
+                        break;
+
+                    case 'command_output':
+                        if (message.data.type === 'stdout') {
+                            this.appendOutput(message.data.data);
+                        } else if (message.data.type === 'stderr') {
+                            this.appendOutput(message.data.data, 'error');
+                        }
+                        break;
+
+                    case 'error':
+                        this.appendOutput(message.data.message, 'error');
+                        break;
+                }
+            }
+
+            sendCommand(command) {
+                if (this.connected && command) {
+                    this.appendOutput(`$ ${command}`);
+                    this.ws.send(JSON.stringify({
+                        type: 'command',
+                        data: { command }
+                    }));
+                }
+            }
+
+            disconnect() {
+                if (this.ws) {
+                    this.ws.close();
+                }
+            }
+
+            updateConnectionStatus(connected) {
+                this.connected = connected;
+                this.statusIndicator.className = `status-indicator status-${connected ? 'connected' : 'disconnected'}`;
+                this.statusText.textContent = connected ? 'Connected' : 'Disconnected';
+                this.connectBtn.disabled = connected;
+                this.disconnectBtn.disabled = !connected;
+                this.terminalInput.disabled = !connected;
+                
+                if (connected) {
+                    this.connectionInfo.textContent = `${this.hostnameInput.value}:${this.portInput.value}`;
+                    this.appendOutput('Connected to server');
+                } else {
+                    this.connectionInfo.textContent = '';
+                }
+            }
+
+            appendOutput(text, type = '') {
+                const outputLine = document.createElement('div');
+                outputLine.textContent = text;
+                if (type) {
+                    outputLine.className = type;
+                }
+                this.terminalOutput.appendChild(outputLine);
+                this.terminalOutput.scrollTop = this.terminalOutput.scrollHeight;
+            }
+        }
+
+        // 初始化终端
+        const terminal = new SSHTerminal();
+    </script>
+</body>
+</html>

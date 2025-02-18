@@ -3,7 +3,7 @@ from unittest.mock import Mock, AsyncMock, patch
 import asyncio
 from typing import Dict, Any
 
-from app.command_dispatcher import (
+from app.core.command_dispatcher import (
     CommandTransmitter,
     Command,
     CommandHandler,

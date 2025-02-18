@@ -6,7 +6,7 @@ from typing import Dict, Any
 
 # filepath: /D:/Project/cobalt-forward-1/app/test_message_bus.py
 
-from app.message_bus import (
+from app.core.message_bus import (
     MessageBus,
     MessageType,
     Message,

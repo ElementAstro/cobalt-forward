@@ -1,6 +1,6 @@
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
-from command_dispatcher import Command, CommandHandler, CommandResult, CommandStatus
+from app.core.command_dispatcher import Command, CommandHandler, CommandResult, CommandStatus
 import json
 import asyncio
 from loguru import logger

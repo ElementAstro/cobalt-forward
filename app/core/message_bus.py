@@ -7,6 +7,8 @@ import uuid
 from enum import Enum
 from abc import ABC, abstractmethod
 
+from loguru import logger
+
 from app.utils.error_handler import CircuitBreaker
 from app.utils.performance import RateLimiter, async_performance_monitor
 from app.client.tcp_client import ClientConfig, TCPClient
@@ -91,6 +93,15 @@ class MessageBus:
         self._message_queue = asyncio.Queue(maxsize=1000)  # 限制队列大小
         self._rate_limiter = RateLimiter(rate_limit=500)  # 限制每秒500条消息
         self._circuit_breaker = CircuitBreaker()
+        self._priority_queue = asyncio.PriorityQueue(maxsize=1000)
+        self._error_handler = self._setup_error_handler()
+
+    def _setup_error_handler(self):
+        async def handler(error: Exception):
+            logger.error(f"MessageBus Error: {error}")
+            # 添加错误恢复逻辑
+            
+        return handler
 
     async def start(self):
         """Start the message bus"""
@@ -105,25 +116,28 @@ class MessageBus:
             self._processing_task = None
 
     @async_performance_monitor()
-    async def publish(self, topic: str, data: Any, message_type: MessageType = MessageType.EVENT) -> None:
+    async def publish(self, topic: str, data: Any, priority: int = 0) -> None:
         """Enhanced publish with rate limiting and circuit breaker"""
         if not await self._rate_limiter.acquire():
-            raise Exception("Message rate limit exceeded")
+            await self._handle_rate_limit_exceeded()
+            return
 
-        async def _protected_publish():
-            message = Message(
-                id=str(uuid.uuid4()),
-                type=message_type,
-                topic=topic,
-                data=data,
-                metadata={'timestamp': asyncio.get_event_loop().time()}
-            )
-            
-            await self._message_queue.put(message)
-            await self._tcp_client.send(self._serializer.serialize(message))
-            self._message_count += 1
+        message = self._create_message(topic, data)
+        await self._priority_queue.put((priority, message))
 
-        await self._circuit_breaker.execute(_protected_publish)
+    async def _handle_rate_limit_exceeded(self):
+        # 处理速率限制超出情况
+        logger.warning("Message rate limit exceeded")
+        # 实现背压机制
+
+    def _create_message(self, topic: str, data: Any) -> Message:
+        return Message(
+            id=str(uuid.uuid4()),
+            type=MessageType.EVENT,
+            topic=topic,
+            data=data,
+            metadata={'timestamp': asyncio.get_event_loop().time()}
+        )
 
     async def request(self, topic: str, data: Any, timeout: float = 30.0) -> Any:
         """Send a request and wait for response"""

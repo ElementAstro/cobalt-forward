@@ -2,7 +2,7 @@ from fastapi import Depends, Request
 from typing import Callable
 from app.exceptions import AuthenticationError
 from app.plugin_system import PluginManager
-from app.event_bus import EventBus
+from app.core.event_bus import EventBus
 
 def get_plugin_manager() -> PluginManager:
     """获取插件管理器实例"""

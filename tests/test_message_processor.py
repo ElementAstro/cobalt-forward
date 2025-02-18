@@ -1,8 +1,8 @@
 import pytest
 from unittest.mock import Mock
 import json
-from app.message_processor import MessageTransformer, MessageFilter, json_payload_transformer, compress_payload_transformer
-from app.message_bus import Message, MessageType
+from app.core.message_processor import MessageTransformer, MessageFilter, json_payload_transformer, compress_payload_transformer
+from app.core.message_bus import Message, MessageType
 
 # filepath: /d:/Project/cobalt-forward-1/app/test_message_processor.py
 

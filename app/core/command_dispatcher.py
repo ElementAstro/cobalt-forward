@@ -11,7 +11,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from loguru import logger
 
-from message_bus import MessageBus
+from app.core.message_bus import MessageBus
 
 # Type variables for generic command handling
 T_Payload = TypeVar('T_Payload')
@@ -92,6 +92,8 @@ class CommandTransmitter:
                                    asyncio.Queue] = defaultdict(asyncio.Queue)
         self._executor = ThreadPoolExecutor(max_workers=10)
         self._metrics = CommandMetrics()
+        self._command_states = {}
+        self._command_locks = {}
 
         logger.info("Initializing CommandTransmitter")
         logger.debug(f"ThreadPoolExecutor created with {10} workers")
@@ -129,53 +131,58 @@ class CommandTransmitter:
             f"Sending command: {type(command).__name__} [ID: {command.context.command_id}]")
         logger.trace(f"Command payload: {command.payload}")
 
-        try:
-            # Apply middleware pipeline
-            logger.debug("Applying middleware pipeline")
-            for middleware in self._middleware:
-                command = await middleware(command)
-                logger.trace(f"Applied middleware: {middleware.__name__}")
+        command_id = command.context.command_id
+        async with self._get_command_lock(command_id):
+            try:
+                self._update_command_state(command_id, "STARTED")
+                # Apply middleware pipeline
+                logger.debug("Applying middleware pipeline")
+                for middleware in self._middleware:
+                    command = await middleware(command)
+                    logger.trace(f"Applied middleware: {middleware.__name__}")
 
-            # Get appropriate handler
-            handler = self._handlers.get(type(command))
-            if not handler:
-                error_msg = f"No handler registered for command type: {type(command)}"
-                logger.error(error_msg)
-                raise ValueError(error_msg)
+                # Get appropriate handler
+                handler = self._handlers.get(type(command))
+                if not handler:
+                    error_msg = f"No handler registered for command type: {type(command)}"
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
 
-            # Execute command
-            logger.info(
-                f"Executing command [ID: {command.context.command_id}]")
-            self._active_commands[command.context.command_id] = command
-            result = await self._execute_with_timeout(handler.handle(command))
+                # Execute command
+                logger.info(
+                    f"Executing command [ID: {command.context.command_id}]")
+                self._active_commands[command.context.command_id] = command
+                result = await self._execute_with_timeout(handler.handle(command))
 
-            # Cache result
-            self._results_cache[command.context.command_id] = result
-            logger.debug(
-                f"Command result cached [ID: {command.context.command_id}]")
+                # Cache result
+                self._results_cache[command.context.command_id] = result
+                logger.debug(
+                    f"Command result cached [ID: {command.context.command_id}]")
 
-            # Update metrics
-            self._metrics.record_execution(result.status)
-            logger.trace(
-                f"Updated metrics for command [ID: {command.context.command_id}]")
+                # Update metrics
+                self._metrics.record_execution(result.status)
+                logger.trace(
+                    f"Updated metrics for command [ID: {command.context.command_id}]")
 
-            if result.status == CommandStatus.COMPLETED:
-                logger.success(
-                    f"Command executed successfully [ID: {command.context.command_id}]")
-            else:
-                logger.warning(
-                    f"Command completed with status: {result.status} [ID: {command.context.command_id}]")
+                if result.status == CommandStatus.COMPLETED:
+                    logger.success(
+                        f"Command executed successfully [ID: {command.context.command_id}]")
+                else:
+                    logger.warning(
+                        f"Command completed with status: {result.status} [ID: {command.context.command_id}]")
 
-            return result
+                self._update_command_state(command_id, "COMPLETED")
+                return result
 
-        except Exception as e:
-            logger.exception(
-                f"Command execution failed [ID: {command.context.command_id}]")
-            return CommandResult(CommandStatus.FAILED, error=e)
-        finally:
-            self._active_commands.pop(command.context.command_id, None)
-            logger.debug(
-                f"Command removed from active commands [ID: {command.context.command_id}]")
+            except Exception as e:
+                logger.exception(
+                    f"Command execution failed [ID: {command.context.command_id}]")
+                self._update_command_state(command_id, "FAILED")
+                return CommandResult(CommandStatus.FAILED, error=e)
+            finally:
+                self._active_commands.pop(command.context.command_id, None)
+                logger.debug(
+                    f"Command removed from active commands [ID: {command.context.command_id}]")
 
     async def send_batch(
         self,
@@ -210,6 +217,17 @@ class CommandTransmitter:
         except asyncio.TimeoutError:
             logger.error("Command execution timed out")
             return CommandResult(CommandStatus.FAILED, error=TimeoutError())
+
+    def _get_command_lock(self, command_id: str) -> asyncio.Lock:
+        if command_id not in self._command_locks:
+            self._command_locks[command_id] = asyncio.Lock()
+        return self._command_locks[command_id]
+
+    def _update_command_state(self, command_id: str, state: str):
+        self._command_states[command_id] = {
+            'state': state,
+            'timestamp': time.time()
+        }
 
     # Middleware implementations
     async def _logging_middleware(self, command: Command) -> Command:

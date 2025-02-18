@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from loguru import logger
 from dataclasses import dataclass
 from fastapi import FastAPI
+from app.core.ssh_forwarder import SSHForwarder
 import time
 
 from app.config_manager import ConfigManager
@@ -99,6 +100,9 @@ def create_app(config_path: str) -> FastAPI:
         # 在开发模式下启用热重载
         config_manager.start_hot_reload()
         logger.info("已启用配置热重载支持")
+
+    # 初始化SSH转发器
+    app.ssh_forwarder = SSHForwarder()
 
     @app.on_event("shutdown")
     async def shutdown_event():

@@ -1,6 +1,6 @@
 from typing import Any, Callable, List, Optional
 from dataclasses import dataclass
-from message_bus import Message, MessageType
+from app.core.message_bus import Message, MessageType
 import json
 import re
 
