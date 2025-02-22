@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from app.core.ssh_forwarder import SSHForwarder
 import time
 
-from app.config_manager import ConfigManager
+from app.config.config_manager import ConfigManager
 from server import app, EnhancedForwarderConfig
 from logger_config import setup_logging
 

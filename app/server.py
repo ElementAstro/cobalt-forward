@@ -22,7 +22,7 @@ from app.utils.performance import PerformanceMonitor
 from logger_config import setup_logging
 from fastapi.responses import JSONResponse
 from aiocache import Cache
-from config_manager import ConfigManager
+from app.config.config_manager import ConfigManager
 
 # Import required components
 from app.client.tcp.client import ClientConfig
@@ -555,6 +555,11 @@ class EnhancedTCPWebSocketForwarder:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 初始化插件管理器
+    app.state.plugin_manager = PluginManager("plugins", "config/plugins")
+    # 初始化配置管理器
+    app.state.config_manager = ConfigManager()
+
     config = EnhancedForwarderConfig(
         tcp_host="localhost",
         tcp_port=8080,
@@ -562,8 +567,20 @@ async def lifespan(app: FastAPI):
         websocket_port=8000
     )
     app.forwarder = EnhancedTCPWebSocketForwarder(config)
+
+    # 加载插件
+    await app.state.plugin_manager.load_plugins()
+    # 启动插件监控
+    await app.state.plugin_manager.start_health_monitor()
+    # 启动插件文件监视
+    await app.state.plugin_manager.start_plugin_watcher()
+
     await app.forwarder.initialize()
     yield
+    # 关闭插件系统
+    app.state.plugin_manager.stop_health_monitor()
+    app.state.plugin_manager.stop_plugin_watcher()
+    await app.state.plugin_manager.shutdown_plugins()
     await app.forwarder.shutdown()
 
 app = FastAPI(lifespan=lifespan)
@@ -719,4 +736,4 @@ async def resume_transfer(transfer_id: str):
         app.forwarder.ftp_server.resume_upload(transfer_id)
         return {"status": "success"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=(str(e)))
