@@ -16,7 +16,7 @@ from app.commands import BulkOperationCommand, DataQueryCommand, DeviceControlCo
 from app.core.event_bus import Event, EventBus, EventPriority
 from app.core.message_transformer import CompressionTransform, MessageEnricher, MessageValidator
 from app.core.middleware import ErrorHandlerMiddleware, PerformanceMiddleware, SecurityMiddleware
-from app.plugin_system import PluginManager
+from app.plugin.plugin_system import PluginManager
 from app.core.protocol_converter import MQTTConverter, ModbusConverter
 from app.utils.performance import PerformanceMonitor
 from logger_config import setup_logging
@@ -25,10 +25,17 @@ from aiocache import Cache
 from config_manager import ConfigManager
 
 # Import required components
-from app.client.tcp_client import ClientConfig
+from app.client.tcp.client import ClientConfig
 from app.core.message_bus import MessageBusEnabledTCPClient, MessageBus, Message, MessageType
 from app.core.command_dispatcher import CommandTransmitter, UserCommand, UserCommandHandler, ScheduledCommand, BatchCommand
 from app.core.message_processor import MessageTransformer, MessageFilter, json_payload_transformer
+from app.client.ssh.client import SSHClient
+from app.client.ssh.config import SSHConfig
+
+# 在文件开头添加导入
+from app.client.ftp.client import EnhancedFTPServer
+from app.client.ftp.config import FTPConfig
+from app.client.ftp.exception import FTPError
 
 # 设置日志
 logger = setup_logging()
@@ -54,6 +61,24 @@ class EnhancedForwarderConfig:
     websocket_ssl: bool = False
     websocket_cert: str = None
     websocket_key: str = None
+    # 添加SSH配置项
+    ssh_enabled: bool = False
+    ssh_host: str = "localhost"
+    ssh_port: int = 22
+    ssh_username: str = None
+    ssh_password: str = None
+    ssh_key_path: str = None
+    ssh_known_hosts: str = None
+    ssh_pool_size: int = 5
+    # 添加FTP配置项
+    ftp_enabled: bool = False
+    ftp_host: str = "localhost"
+    ftp_port: int = 21
+    ftp_user: str = None
+    ftp_password: str = None
+    ftp_root_dir: str = "/tmp/ftp"
+    ftp_passive_ports_start: int = 60000
+    ftp_passive_ports_end: int = 65535
 
 
 class EnhancedConnectionManager:
@@ -143,6 +168,9 @@ class EnhancedTCPWebSocketForwarder:
         self.protocol_handlers = {}
         self.event_bus = EventBus()
         self.plugin_manager = PluginManager()
+        self.ssh_client = None
+        self.ssh_pool = None
+        self.ftp_server = None
 
     async def initialize(self):
         """Initialize components with enhanced monitoring"""
@@ -223,7 +251,7 @@ class EnhancedTCPWebSocketForwarder:
 
         # 初始化MQTT客户端
         if self.config.mqtt_enabled:
-            from app.client.mqtt_client import MQTTConfig, MQTTClient
+            from app.client.mqtt.client import MQTTConfig, MQTTClient
             mqtt_config = MQTTConfig(
                 broker=self.config.mqtt_host,
                 port=self.config.mqtt_port,
@@ -242,7 +270,7 @@ class EnhancedTCPWebSocketForwarder:
 
         # 初始化WebSocket客户端（如果需要外部WebSocket连接）
         if self.config.websocket_enabled:
-            from app.client.websocket_client import WebSocketConfig, WebSocketClient
+            from app.client.websocket.client import WebSocketConfig, WebSocketClient
             ws_config = WebSocketConfig(
                 uri=f"{'wss' if self.config.websocket_ssl else 'ws'}://{self.config.websocket_host}:{self.config.websocket_port}",
                 ssl_context=self._create_ssl_context() if self.config.websocket_ssl else None,
@@ -253,6 +281,25 @@ class EnhancedTCPWebSocketForwarder:
                 'message', self._handle_ws_message)
             await self.websocket_client.connect()
             logger.info("WebSocket client initialized and connected")
+
+        # 初始化SSH客户端
+        if self.config.ssh_enabled:
+            ssh_config = SSHConfig(
+                hostname=self.config.ssh_host,
+                port=self.config.ssh_port,
+                username=self.config.ssh_username,
+                password=self.config.ssh_password,
+                private_key_path=self.config.ssh_key_path,
+                known_hosts=self.config.ssh_known_hosts,
+                pool=True,
+                pool_size=self.config.ssh_pool_size
+            )
+            self.ssh_client = SSHClient(ssh_config)
+            try:
+                self.ssh_client.connect_with_retry()
+                logger.info("SSH client initialized and connected")
+            except Exception as e:
+                logger.error(f"SSH connection failed: {e}")
 
         # 注册协议处理器
         self.protocol_handlers = {
@@ -288,6 +335,29 @@ class EnhancedTCPWebSocketForwarder:
             for event_name, handlers in plugin._event_handlers.items():
                 for handler in handlers:
                     self.event_bus.subscribe(event_name, handler)
+
+        # 初始化FTP服务器
+        if self.config.ftp_enabled:
+            ftp_config = FTPConfig(
+                host=self.config.ftp_host,
+                port=self.config.ftp_port,
+                root_dir=self.config.ftp_root_dir
+            )
+            self.ftp_server = EnhancedFTPServer(ftp_config)
+
+            # 添加默认用户
+            if self.config.ftp_user and self.config.ftp_password:
+                self.ftp_server.add_user(
+                    self.config.ftp_user,
+                    self.config.ftp_password,
+                    self.config.ftp_root_dir
+                )
+
+            # 启动FTP服务器
+            import threading
+            threading.Thread(
+                target=self.ftp_server.start_server, daemon=True).start()
+            logger.info("FTP server initialized and started")
 
     async def _run_scheduler(self):
         while True:
@@ -333,8 +403,12 @@ class EnhancedTCPWebSocketForwarder:
             self.mqtt_client.disconnect()
         if self.websocket_client:
             await self.websocket_client.close_connection()
+        if self.ssh_client:
+            self.ssh_client.close()
         await self.event_bus.stop()
         await self.plugin_manager.shutdown_plugins()
+        if self.ftp_server and self.ftp_server.server:
+            self.ftp_server.server.close_all()
         logger.info("Enhanced forwarder shutdown completed")
 
     async def forward_message(self, message: Dict[str, Any], protocol: str = None):
@@ -436,6 +510,46 @@ class EnhancedTCPWebSocketForwarder:
         error_info = event.data
         logger.error(f"Error occurred: {error_info}")
 
+    async def execute_ssh_command(self, command: str, stream: bool = False) -> Dict[str, Any]:
+        """执行SSH命令"""
+        if not self.ssh_client:
+            raise ValueError("SSH client not initialized")
+
+        try:
+            if stream:
+                return self.ssh_client.execute_command_stream(command)
+            else:
+                result = await self.ssh_client.execute_command_async(command)
+                return {
+                    "status": "success",
+                    "result": result
+                }
+        except Exception as e:
+            logger.error(f"SSH command execution error: {e}")
+            return {
+                "status": "error",
+                "error": str(e)
+            }
+
+    async def sync_ssh_directory(self, local_dir: str, remote_dir: str, delete: bool = False) -> Dict[str, Any]:
+        """同步目录到SSH服务器"""
+        if not self.ssh_client:
+            raise ValueError("SSH client not initialized")
+
+        try:
+            result = self.ssh_client.sync_directory(
+                local_dir, remote_dir, delete)
+            return {
+                "status": "success",
+                "result": result
+            }
+        except Exception as e:
+            logger.error(f"SSH directory sync error: {e}")
+            return {
+                "status": "error",
+                "error": str(e)
+            }
+
 # Update FastAPI application setup
 
 
@@ -493,4 +607,116 @@ async def get_metrics():
         return JSONResponse(content=metrics.__dict__)
     except Exception as e:
         logger.error(f"Error getting metrics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/ssh/execute")
+async def execute_ssh_command(
+    command: str = Body(...),
+    stream: bool = Query(False)
+):
+    """执行SSH命令"""
+    try:
+        result = await app.forwarder.execute_ssh_command(command, stream)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/ssh/sync")
+async def sync_ssh_directory(
+    local_dir: str = Body(...),
+    remote_dir: str = Body(...),
+    delete: bool = Body(False)
+):
+    """同步目录到SSH服务器"""
+    try:
+        result = await app.forwarder.sync_ssh_directory(local_dir, remote_dir, delete)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# 添加FTP相关路由
+
+
+@app.post("/ftp/upload")
+async def upload_file(
+    local_path: str = Body(...),
+    remote_path: str = Body(...),
+    secure: bool = Body(False)
+):
+    """上传文件到FTP服务器"""
+    try:
+        if secure:
+            result = app.forwarder.ftp_server.secure_upload(
+                local_path, remote_path)
+        else:
+            with open(local_path, 'rb') as f:
+                result = app.forwarder.ftp_server.upload_file(
+                    local_path, remote_path)
+        return {"status": "success", "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/ftp/download")
+async def download_file(
+    remote_path: str = Body(...),
+    local_path: str = Body(...),
+    verify: bool = Body(False)
+):
+    """从FTP服务器下载文件"""
+    try:
+        if verify:
+            result = app.forwarder.ftp_server.download_with_verification(
+                remote_path, local_path)
+        else:
+            result = app.forwarder.ftp_server.download_file(
+                remote_path, local_path)
+        return {"status": "success", "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/ftp/sync")
+async def sync_directory(
+    local_dir: str = Body(...),
+    remote_dir: str = Body(...),
+    delete_extra: bool = Body(False)
+):
+    """同步目录到FTP服务器"""
+    try:
+        app.forwarder.ftp_server.synchronize_directories(
+            local_dir, remote_dir, delete_extra)
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/ftp/batch")
+async def batch_process(
+    action: str = Body(...),
+    file_list: List[str] = Body(...),
+    target_dir: str = Body(...)
+):
+    """批量处理FTP操作"""
+    try:
+        results = app.forwarder.ftp_server.batch_process(
+            action,
+            file_list,
+            remote_dir=target_dir if action in ["upload", "sync"] else None,
+            local_dir=target_dir if action == "download" else None
+        )
+        return {"status": "success", "results": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/ftp/resume/{transfer_id}")
+async def resume_transfer(transfer_id: str):
+    """恢复中断的传输"""
+    try:
+        app.forwarder.ftp_server.resume_upload(transfer_id)
+        return {"status": "success"}
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -11,7 +11,7 @@ from loguru import logger
 
 from app.utils.error_handler import CircuitBreaker
 from app.utils.performance import RateLimiter, async_performance_monitor
-from app.client.tcp_client import ClientConfig, TCPClient
+from app.client.tcp.client import ClientConfig, TCPClient
 
 T = TypeVar('T')
 
@@ -100,7 +100,7 @@ class MessageBus:
         async def handler(error: Exception):
             logger.error(f"MessageBus Error: {error}")
             # 添加错误恢复逻辑
-            
+
         return handler
 
     async def start(self):
