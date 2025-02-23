@@ -12,6 +12,13 @@ from loguru import logger
 from app.utils.error_handler import CircuitBreaker
 from app.utils.performance import RateLimiter, async_performance_monitor
 from app.client.tcp.client import ClientConfig, TCPClient
+from app.utils.error_handler import ExceptionHandler, RetryConfig, error_boundary
+from app.core.exceptions import (
+    MessageBusException, MessageDeliveryException,
+    MessageProcessingException, ConnectionException
+)
+
+_error_handler = ExceptionHandler()
 
 T = TypeVar('T')
 
@@ -72,6 +79,77 @@ class JSONSerializer(Serializer):
 
 
 class MessageBus:
+    """
+    High-performance asynchronous message bus.
+    This class provides an asynchronous infrastructure for publishing, requesting, and subscribing
+    to messages over a TCP connection. It includes features such as error handling with retries,
+    rate limiting, circuit breaking, priority queue processing, and metrics collection.
+    Attributes:
+        _tcp_client (TCPClient): The TCP client used for sending messages.
+        _serializer (Serializer): The serializer used to serialize messages (default JSONSerializer).
+        _subscribers (Dict[str, List[asyncio.Queue]]): Mapping of topics to lists of subscriber queues.
+        _response_futures (Dict[str, asyncio.Future]): Futures for pending responses keyed by correlation IDs.
+        _running (bool): Flag indicating whether the message bus is currently running.
+        _processing_task (Optional[asyncio.Task]): The async task responsible for processing messages.
+        _message_count (int): Count of processed messages.
+        _processing_times (List[float]): Recorded processing times for messages.
+        _message_queue (asyncio.Queue): Queue for incoming messages with a size limit.
+        _rate_limiter (RateLimiter): Rate limiter enforcing a limit on messages per second.
+        _circuit_breaker (CircuitBreaker): Circuit breaker to prevent executing failing operations.
+        _priority_queue (asyncio.PriorityQueue): Priority queue for ordering message processing.
+        _error_handler (ExceptionHandler): Centralized error handling mechanism.
+        _message_retry_config (RetryConfig): Configuration for retry logic on message delivery failures.
+    Methods:
+        __init__(tcp_client, serializer=JSONSerializer()):
+            Initializes the MessageBus instance, sets up queues, rate limiter, circuit breaker,
+            and error handlers, and registers TCP client callbacks.
+        _setup_error_handlers():
+            Registers custom asynchronous error handlers for MessageDeliveryException
+            and ConnectionException, providing logic for retries and reconnection.
+        async _handle_message_failure(exc: MessageDeliveryException):
+            Handles cases where message delivery fails permanently, potentially persisting
+            the failed message (e.g., to a dead-letter queue or database).
+        async start():
+            Starts the message bus by initiating the asynchronous task to process messages.
+        async stop():
+            Stops the message bus by terminating the message processing task gracefully.
+        async publish(topic: str, data: Any, priority: int = 0) -> None:
+            Publishes a message on a specified topic. Prior to sending, it enforces rate limiting,
+            wraps the send operation with a circuit breaker for resilience, and encapsulates errors
+            using custom exception handling.
+        def _create_message(topic: str, data: Any) -> Message:
+            Constructs a new Message instance with a unique ID, specified topic and data, and
+            attaches metadata such as a timestamp.
+        async request(topic: str, data: Any, timeout: float = 30.0) -> Any:
+            Sends a request-type message and awaits a corresponding response. It creates a future
+            linked to a unique correlation ID, sends the message over the TCP client, and waits for
+            a response within the specified timeout period.
+        async subscribe(topic: str) -> asyncio.Queue:
+            Subscribes to a given topic by creating and returning a new asyncio queue where messages
+            are delivered for that topic.
+        async unsubscribe(topic: str, queue: asyncio.Queue) -> None:
+            Unsubscribes a previously registered queue from the specified topic, removing it from the
+            subscription list.
+        async _process_messages():
+            Continuously processes incoming messages from the priority queue. Each message is handled
+            using the _handle_message method and wrapped in an error boundary to catch and report exceptions.
+        async _handle_message(message: Message):
+            Processes an individual message. If the message is a response with a matching correlation
+            ID, it resolves the corresponding future; otherwise, it dispatches the message to all subscriber
+            queues. It also tracks processing time and updates related metrics.
+        def _update_metrics(processing_time: float):
+            Updates the metrics of the message bus by incrementing the message count and appending the
+            latest processing time, while maintaining a bounded record for performance analysis.
+        def _handle_tcp_message(data: bytes):
+            Callback for processing incoming TCP messages. (Implement additional processing as needed.)
+        def _handle_tcp_error(error: Exception):
+            Callback for handling errors reported by the TCP client. (Implement custom error handling logic.)
+            Returns a dictionary containing key performance and state metrics of the message bus, such as:
+                - message_count: Total number of processed messages.
+                - average_processing_time: Average time taken to process messages.
+                - active_subscribers: Total number of currently active subscriber queues.
+                - pending_responses: Number of pending response futures.
+    """
     """High-performance asynchronous message bus"""
 
     def __init__(self, tcp_client: 'TCPClient', serializer: Serializer = JSONSerializer()):
@@ -94,14 +172,40 @@ class MessageBus:
         self._rate_limiter = RateLimiter(rate_limit=500)  # 限制每秒500条消息
         self._circuit_breaker = CircuitBreaker()
         self._priority_queue = asyncio.PriorityQueue(maxsize=1000)
-        self._error_handler = self._setup_error_handler()
+        self._error_handler = ExceptionHandler()
+        self._setup_error_handlers()
+        self._message_retry_config = RetryConfig(
+            max_retries=3,
+            delay=1.0,
+            backoff_factor=2.0,
+            exceptions=(MessageDeliveryException,)
+        )
 
-    def _setup_error_handler(self):
-        async def handler(error: Exception):
-            logger.error(f"MessageBus Error: {error}")
-            # 添加错误恢复逻辑
+    def _setup_error_handlers(self):
+        """设置错误处理器"""
+        async def handle_delivery_error(exc: MessageDeliveryException):
+            logger.error(
+                f"Message delivery failed: {exc.message}, retries: {exc.retry_count}")
+            if exc.retry_count >= self._message_retry_config.max_retries:
+                await self._handle_message_failure(exc)
+            return {"status": "failed", "error": str(exc)}
 
-        return handler
+        async def handle_connection_error(exc: ConnectionException):
+            logger.critical(f"Connection error: {exc.message}")
+            await self._tcp_client.reconnect()
+            return {"status": "reconnecting", "error": str(exc)}
+
+        self._error_handler.register(
+            MessageDeliveryException, handle_delivery_error)
+        self._error_handler.register(
+            ConnectionException, handle_connection_error)
+
+    async def _handle_message_failure(self, exc: MessageDeliveryException):
+        """处理消息最终失败的情况"""
+        # 实现消息持久化或死信队列逻辑
+        logger.error(f"Message permanently failed: {exc}")
+        # 可以将消息保存到死信队列或数据库中
+        pass
 
     async def start(self):
         """Start the message bus"""
@@ -115,20 +219,23 @@ class MessageBus:
             await self._processing_task
             self._processing_task = None
 
+    @error_boundary(error_handler=_error_handler)
     @async_performance_monitor()
     async def publish(self, topic: str, data: Any, priority: int = 0) -> None:
-        """Enhanced publish with rate limiting and circuit breaker"""
+        """Enhanced publish with error handling"""
         if not await self._rate_limiter.acquire():
-            await self._handle_rate_limit_exceeded()
-            return
+            raise MessageDeliveryException("Rate limit exceeded")
 
-        message = self._create_message(topic, data)
-        await self._priority_queue.put((priority, message))
-
-    async def _handle_rate_limit_exceeded(self):
-        # 处理速率限制超出情况
-        logger.warning("Message rate limit exceeded")
-        # 实现背压机制
+        try:
+            message = self._create_message(topic, data)
+            await self._circuit_breaker.execute(
+                self._tcp_client.send,
+                self._serializer.serialize(message)
+            )
+        except Exception as e:
+            raise MessageDeliveryException(
+                f"Failed to publish message: {str(e)}"
+            ) from e
 
     def _create_message(self, topic: str, data: Any) -> Message:
         return Message(
@@ -174,35 +281,55 @@ class MessageBus:
             if not self._subscribers[topic]:
                 del self._subscribers[topic]
 
+    @error_boundary(error_handler=_error_handler)
     async def _process_messages(self):
-        """Process incoming messages"""
+        """Process incoming messages with error handling"""
         while self._running:
             try:
-                data = await self._tcp_client.receive()
-                if data:
-                    start_time = asyncio.get_event_loop().time()
-                    message = self._serializer.deserialize(data)
-
-                    # Handle response messages
-                    if message.type == MessageType.RESPONSE and message.correlation_id:
-                        if message.correlation_id in self._response_futures:
-                            self._response_futures[message.correlation_id].set_result(
-                                message.data)
-
-                    # Distribute to subscribers
-                    if message.topic in self._subscribers:
-                        tasks = [
-                            queue.put(message)
-                            for queue in self._subscribers[message.topic]
-                        ]
-                        await asyncio.gather(*tasks)
-
-                    # Update metrics
-                    processing_time = asyncio.get_event_loop().time() - start_time
-                    self._processing_times.append(processing_time)
-
+                priority, message = await self._priority_queue.get()
+                await self._handle_message(message)
+                self._priority_queue.task_done()
             except Exception as e:
-                print(f"Error processing message: {e}")
+                raise MessageProcessingException(
+                    f"Error processing message: {str(e)}"
+                ) from e
+
+    async def _handle_message(self, message: Message):
+        """Handle single message with error tracking"""
+        try:
+            start_time = asyncio.get_event_loop().time()
+
+            # 处理响应消息
+            if message.type == MessageType.RESPONSE and message.correlation_id:
+                if message.correlation_id in self._response_futures:
+                    self._response_futures[message.correlation_id].set_result(
+                        message.data)
+                    return
+
+            # 分发到订阅者
+            if message.topic in self._subscribers:
+                await asyncio.gather(*[
+                    queue.put(message) for queue in self._subscribers[message.topic]
+                ])
+
+            # 更新指标
+            processing_time = asyncio.get_event_loop().time() - start_time
+            self._update_metrics(processing_time)
+
+        except Exception as e:
+            # 更新错误统计
+            await self._error_handler.handle(
+                MessageProcessingException(
+                    f"Message handling failed: {str(e)}")
+            )
+
+    def _update_metrics(self, processing_time: float):
+        """更新性能指标"""
+        self._message_count += 1
+        self._processing_times.append(processing_time)
+        # 保持最近1000条消息的处理时间记录
+        if len(self._processing_times) > 1000:
+            self._processing_times.pop(0)
 
     def _handle_tcp_message(self, data: bytes):
         """Handle TCP client messages"""

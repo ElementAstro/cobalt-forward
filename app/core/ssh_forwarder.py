@@ -5,7 +5,7 @@ from typing import AsyncGenerator, Dict, Optional, Set, List
 from datetime import datetime
 import uuid
 from loguru import logger
-from app.client.ssh_client import SSHClient, SSHConfig
+from app.client.ssh.client import SSHClient, SSHConfig
 from fastapi import WebSocket
 import json
 from app.core.stream_handler import StreamHandler
@@ -34,6 +34,81 @@ class SSHSession:
 
 
 class SSHForwarder:
+    """
+    SSHForwarder manages SSH sessions and facilitates communication between SSH channels and WebSocket clients.
+    It supports operations such as session creation, command execution, terminal resizing, file transfers,
+    and streaming of file data or command output.
+    Attributes:
+        sessions (Dict[str, SSHSession]): Active SSH sessions mapped by their session IDs.
+        _running_tasks (Set[asyncio.Task]): Set of asynchronous tasks managing session activities.
+        file_transfers (Dict[str, asyncio.Task]): Ongoing file transfer tasks indexed by session or transfer IDs.
+        session_logs (Dict[str, List[Dict]]): Logs of command executions and other events per session.
+        stream_handler (StreamHandler): Handler for managing streamed file uploads and command output.
+        upload_dir (Path): Directory for temporary storage of files during uploads.
+    Methods:
+        __init__():
+            Initializes the SSHForwarder instance, sets up session management, and ensures the upload directory exists.
+        create_session(websocket: WebSocket, ssh_config: SSHConfig) -> str:
+            Creates a new SSH session using the provided WebSocket and SSH configuration.
+            Establishes an SSH connection and shell channel, stores session details, and starts asynchronous monitoring tasks.
+        close_session(session_id: str):
+            Closes the active SSH session identified by session_id.
+            Shuts down the connection gracefully and removes session data.
+        send_to_ssh(session_id: str, data: str):
+            Sends data from the WebSocket client to the SSH channel for the specified session.
+        handle_message(session_id: str, message: str):
+            Processes an incoming WebSocket message.
+            Determines the message type and delegates to the appropriate handler for terminal input, resizing, file transfers,
+            executing commands, or streaming operations.
+        resize_terminal(session_id: str, rows: int, cols: int):
+            Adjusts the terminal window size for the given SSH session both locally and on the remote channel.
+        start_file_upload(session_id: str, filename: str, data: str):
+            Initiates a file upload operation by creating an asynchronous task to upload the file data
+            to a designated temporary path.
+        start_file_download(session_id: str, path: str):
+            Initiates a file download operation from the remote SSH session.
+            On success, sends the downloaded file data to the client; on failure, returns an error status.
+        execute_command(session_id: str, command: str):
+            Executes a command on the remote SSH session.
+            Handles both synchronous and asynchronous command execution, logs the command along with its result,
+            and sends the command output or error back to the client.
+        get_session_stats(session_id: str) -> Dict:
+            Retrieves statistics for a specific SSH session including creation time, uptime, data transfer details,
+            command execution count, and last activity timestamp.
+        _update_command_history(session_id: str, command: str):
+            Updates the command history for the session and records the last activity time.
+        _log_command(session_id: str, command: str, result: Dict):
+            Logs details of a command execution, including timestamp, command string, exit code, and command output.
+        _send_status(session_id: str, status: str, data: Dict = None):
+            Sends a status message to the WebSocket client.
+            The message includes the status type and additional optional data.
+        _send_error(session_id: str, error: str):
+            Sends an error message to the client by wrapping the error details in a status message.
+        _send_command_result(session_id: str, result: Dict):
+            Sends the result of a command execution to the client via the WebSocket connection.
+        _send_file_data(session_id: str, filename: str, data: bytes):
+            Sends file data encoded in base64 to the client as part of a file download operation.
+        _start_session_tasks(session_id: str):
+            Launches asynchronous tasks to forward SSH output to the WebSocket and monitor session activity.
+        _monitor_session(session_id: str):
+            Periodically monitors the SSH session for inactivity.
+            Closes the session if it remains idle beyond a specified timeout period.
+        _forward_ssh_to_ws(session_id: str):
+            Continuously reads SSH channel output and forwards any available data to the WebSocket client.
+        _handle_file_transfer(session_id: str, payload: Dict):
+            Manages file transfer operations including initiating transfers, handling file chunks,
+            and completing file transfers with appropriate notifications to the client.
+        _handle_stream_file(session_id: str, payload: Dict):
+            Handles streaming file transfers for both downloads (streaming data from remote file)
+            and uploads (receiving streamed data and transferring it to the remote destination).
+        stream_remote_file(session_id: str, remote_path: str) -> AsyncGenerator[bytes, None]:
+            Provides an asynchronous generator that streams remote file data in chunks for processing.
+        _handle_command(session_id: str, payload: Dict):
+            Processes a command execution request.
+            Supports both streaming and non-streaming command execution, sending real-time output or a final result
+            back to the client, and increments the executed command count.
+    """
+
     def __init__(self):
         self.sessions: Dict[str, SSHSession] = {}
         self._running_tasks: Set[asyncio.Task] = set()
@@ -259,7 +334,7 @@ class SSHForwarder:
         """处理文件传输请求"""
         session = self.sessions[session_id]
         operation = payload.get("operation")
-        
+
         if operation == "start":
             # 开始新的文件传输
             transfer_id = str(uuid.uuid4())
@@ -270,24 +345,24 @@ class SSHForwarder:
                 "path": self.upload_dir / payload["filename"]
             }
             await self._send_status(session_id, "transfer_ready", {"transfer_id": transfer_id})
-            
+
         elif operation == "chunk":
             # 处理文件块
             transfer_id = payload["transfer_id"]
             if transfer_id in self.file_transfers:
                 transfer = self.file_transfers[transfer_id]
                 chunk = base64.b64decode(payload["data"])
-                
+
                 with open(transfer["path"], 'ab') as f:
                     f.write(chunk)
-                
+
                 transfer["received"] += len(chunk)
                 await self._send_status(session_id, "transfer_progress", {
                     "transfer_id": transfer_id,
                     "received": transfer["received"],
                     "total": transfer["size"]
                 })
-        
+
         elif operation == "complete":
             # 完成文件传输
             transfer_id = payload["transfer_id"]
@@ -318,14 +393,14 @@ class SSHForwarder:
                 "data": "",
                 "more": False
             })
-            
+
         elif operation == "upload":
             # 准备接收流式上传
             file_path = self.upload_dir / payload["filename"]
             async for chunk in self.stream_handler.receive_file_upload(session.websocket):
                 with open(file_path, 'ab') as f:
                     f.write(chunk)
-            
+
             # 上传完成后传输到远程
             await session.client.upload_file(str(file_path), payload["remote_path"])
             os.unlink(file_path)  # 清理临时文件
@@ -358,8 +433,8 @@ class SSHForwarder:
                 # 普通命令执行
                 result = await session.client.execute_command_async(command)
                 await self._send_command_result(session_id, result)
-            
+
             session.stats.commands_executed += 1
-            
+
         except Exception as e:
             await self._send_error(session_id, f"命令执行失败: {str(e)}")

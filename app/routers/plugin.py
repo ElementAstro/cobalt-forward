@@ -1,58 +1,139 @@
-from fastapi import APIRouter, HTTPException, Depends, Body, Query, Path
+from fastapi import APIRouter, HTTPException, Depends, Body, Query, Path, status
 from typing import Dict, Any, List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, validator
 from app.plugin.plugin_system import PluginManager, PluginMetadata, PluginPermission
 from app.plugin.dependencies import get_plugin_manager
-import yaml
+from app.core.exceptions import PluginError
+import asyncio
 from loguru import logger
-
-router = APIRouter(prefix="/api/plugins", tags=["plugins"])
+from datetime import datetime
 
 
 class PluginConfig(BaseModel):
-    enabled: bool = True
-    config: Dict[str, Any] = {}
+    """Plugin configuration model"""
+    enabled: bool = Field(default=True, description="Plugin enabled status")
+    config: Dict[str, Any] = Field(
+        default_factory=dict, description="Plugin configuration")
+
+    @validator('config')
+    def validate_config(cls, v):
+        if not isinstance(v, dict):
+            raise ValueError("Config must be a dictionary")
+        return v
 
 
 class PluginResponse(BaseModel):
-    name: str
-    metadata: Optional[PluginMetadata]
-    state: str
-    config: Dict[str, Any]
+    """Plugin response model"""
+    name: str = Field(..., description="Plugin name")
+    metadata: Optional[PluginMetadata] = Field(
+        None, description="Plugin metadata")
+    state: str = Field(..., description="Plugin state")
+    config: Dict[str, Any] = Field(..., description="Plugin configuration")
+    last_updated: datetime = Field(default_factory=datetime.utcnow)
 
 
-@router.get("/", response_model=List[Dict[str, Any]])
-async def list_plugins(plugin_manager: PluginManager = Depends(get_plugin_manager)):
-    """获取所有插件列表"""
+class PluginFunctionParams(BaseModel):
+    """Plugin function parameters model"""
+    params: Dict[str, Any] = Field(default_factory=dict)
+    timeout: float = Field(default=30.0, ge=0.1, le=300.0)
+
+
+router = APIRouter(
+    prefix="/api/plugins",
+    tags=["plugins"],
+    responses={
+        status.HTTP_404_NOT_FOUND: {"description": "Plugin not found"},
+        status.HTTP_500_INTERNAL_SERVER_ERROR: {
+            "description": "Internal server error"}
+    }
+)
+
+
+@router.get("/", response_model=List[PluginResponse])
+async def list_plugins(
+    plugin_manager: PluginManager = Depends(get_plugin_manager),
+    limit: int = Query(default=100, ge=1, le=1000)
+):
+    """List all available plugins"""
     try:
-        return list(plugin_manager.get_plugin_info().values())
+        plugins = plugin_manager.get_plugin_info()
+        return [
+            PluginResponse(
+                name=name,
+                metadata=info.get("metadata"),
+                state=info.get("state", "unknown"),
+                config=info.get("config", {}),
+            )
+            for name, info in list(plugins.items())[:limit]
+        ]
     except Exception as e:
-        logger.error(f"Error listing plugins: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Failed to list plugins: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve plugin list: {str(e)}"
+        )
 
 
-@router.get("/{plugin_name}")
+@router.get("/{plugin_name}", response_model=PluginResponse)
 async def get_plugin_details(
-    plugin_name: str = Path(...),
+    plugin_name: str = Path(..., min_length=1),
     plugin_manager: PluginManager = Depends(get_plugin_manager)
 ):
-    """获取插件详细信息"""
-    info = plugin_manager.get_plugin_info().get(plugin_name)
-    if not info:
-        raise HTTPException(status_code=404, detail="Plugin not found")
-    return info
+    """Get detailed plugin information"""
+    try:
+        info = plugin_manager.get_plugin_info().get(plugin_name)
+        if not info:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Plugin '{plugin_name}' not found"
+            )
+        return PluginResponse(
+            name=plugin_name,
+            metadata=info.get("metadata"),
+            state=info.get("state", "unknown"),
+            config=info.get("config", {})
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get plugin details: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve plugin details: {str(e)}"
+        )
 
 
-@router.post("/{plugin_name}/reload")
+@router.post("/{plugin_name}/reload", status_code=status.HTTP_200_OK)
 async def reload_plugin(
-    plugin_name: str = Path(...),
+    plugin_name: str = Path(..., min_length=1),
     plugin_manager: PluginManager = Depends(get_plugin_manager)
 ):
-    """重新加载插件"""
-    success = await plugin_manager.reload_plugin(plugin_name)
-    if not success:
-        raise HTTPException(status_code=400, detail="Failed to reload plugin")
-    return {"status": "success"}
+    """Reload plugin"""
+    try:
+        async with asyncio.timeout(30):
+            success = await plugin_manager.reload_plugin(plugin_name)
+
+        if not success:
+            raise PluginError("Plugin reload failed")
+
+        logger.info(f"Successfully reloaded plugin: {plugin_name}")
+        return {
+            "status": "success",
+            "message": f"Plugin '{plugin_name}' reloaded successfully",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except asyncio.TimeoutError:
+        logger.error(f"Plugin reload timeout: {plugin_name}")
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Plugin reload operation timed out"
+        )
+    except Exception as e:
+        logger.error(f"Failed to reload plugin: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to reload plugin: {str(e)}"
+        )
 
 
 @router.get("/{plugin_name}/health")
