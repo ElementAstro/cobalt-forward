@@ -555,6 +555,14 @@ class EnhancedTCPWebSocketForwarder:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 初始化配置管理器
+    app.state.config_manager = ConfigManager(
+        config_path="config/config.yaml",
+        encrypt=True
+    )
+    await app.state.config_manager.load_config()
+    app.state.config_manager.start_hot_reload()
+    
     # 初始化插件管理器
     app.state.plugin_manager = PluginManager("plugins", "config/plugins")
     # 初始化配置管理器
@@ -582,6 +590,7 @@ async def lifespan(app: FastAPI):
     app.state.plugin_manager.stop_plugin_watcher()
     await app.state.plugin_manager.shutdown_plugins()
     await app.forwarder.shutdown()
+    app.state.config_manager.stop_hot_reload()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -600,6 +609,10 @@ app.include_router(websocket.router)
 app.include_router(commands.router)
 app.include_router(system.router)
 app.include_router(plugin.router)
+
+# 在app路由注册部分添加:
+from app.routers import config
+app.include_router(config.router)
 
 # 移除所有原有的路由处理函数
 # 保留以下基础路由

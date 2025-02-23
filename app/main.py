@@ -14,6 +14,8 @@ import time
 from app.config.config_manager import ConfigManager
 from server import app, EnhancedForwarderConfig
 from logger_config import setup_logging
+from app.routers import router
+from app.core.middleware import ErrorHandlerMiddleware, PerformanceMiddleware, SecurityMiddleware
 
 # 创建命令行应用
 cli = typer.Typer()
@@ -90,7 +92,15 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
 def create_app(config_path: str) -> FastAPI:
     """创建FastAPI应用并配置热重载"""
     config = load_config(config_path)
-    app = FastAPI()
+    app = FastAPI(title="Cobalt Forward API")
+
+    # 添加中间件
+    app.add_middleware(ErrorHandlerMiddleware)
+    app.add_middleware(PerformanceMiddleware)
+    app.add_middleware(SecurityMiddleware)
+
+    # 包含路由
+    app.include_router(router)
 
     # 初始化配置管理器
     config_manager = ConfigManager(config_path)
@@ -104,8 +114,31 @@ def create_app(config_path: str) -> FastAPI:
     # 初始化SSH转发器
     app.ssh_forwarder = SSHForwarder()
 
+    @app.on_event("startup")
+    async def startup_event():
+        # 初始化各个组件
+        from app.routers.core import (
+            ssh_forwarder,
+            upload_manager,
+            message_bus,
+            event_bus
+        )
+        await message_bus.start()
+        await event_bus.start()
+        await upload_manager.start()
+
     @app.on_event("shutdown")
     async def shutdown_event():
+        # 关闭组件
+        from app.routers.core import (
+            ssh_forwarder,
+            upload_manager,
+            message_bus,
+            event_bus
+        )
+        await message_bus.stop()
+        await event_bus.stop()
+        await upload_manager.stop()
         config_manager.stop_hot_reload()
         logger.info("应用关闭，停止配置热重载")
 
