@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import time
 from typing import Dict, List, Any
 
+
 @dataclass
 class PluginMetadata:
     """插件元数据"""
@@ -14,6 +15,7 @@ class PluginMetadata:
     load_priority: int = 100
     config_schema: Dict = None
 
+
 class PluginState:
     """插件状态"""
     UNLOADED = "UNLOADED"
@@ -22,8 +24,10 @@ class PluginState:
     ERROR = "ERROR"
     DISABLED = "DISABLED"
 
+
 class PluginMetrics:
     """插件性能指标"""
+
     def __init__(self):
         self.execution_times: List[float] = []
         self.memory_usage: List[float] = []

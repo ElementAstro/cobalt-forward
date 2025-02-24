@@ -1,13 +1,15 @@
 import base64
 from dataclasses import dataclass
 import asyncio
-from typing import AsyncGenerator, Dict, Optional, Set, List
+import time
+from typing import AsyncGenerator, Dict, Optional, Set, List, Any
 from datetime import datetime
 import uuid
 from loguru import logger
 from app.client.ssh.client import SSHClient, SSHConfig
 from fastapi import WebSocket
 import json
+from app.core.base import BaseComponent
 from app.core.stream_handler import StreamHandler
 import os
 from pathlib import Path
@@ -33,7 +35,7 @@ class SSHSession:
     command_history: List[str] = None
 
 
-class SSHForwarder:
+class SSHForwarder(BaseComponent):
     """
     SSHForwarder manages SSH sessions and facilitates communication between SSH channels and WebSocket clients.
     It supports operations such as session creation, command execution, terminal resizing, file transfers,
@@ -110,6 +112,7 @@ class SSHForwarder:
     """
 
     def __init__(self):
+        super().__init__()
         self.sessions: Dict[str, SSHSession] = {}
         self._running_tasks: Set[asyncio.Task] = set()
         self.file_transfers: Dict[str, asyncio.Task] = {}
@@ -117,7 +120,13 @@ class SSHForwarder:
         self.stream_handler = StreamHandler()
         self.upload_dir = Path("/tmp/ssh_uploads")
         self.upload_dir.mkdir(parents=True, exist_ok=True)
+        self._message_bus = None
         logger.info("SSH转发器初始化完成")
+
+    async def set_message_bus(self, message_bus):
+        """设置消息总线"""
+        self._message_bus = message_bus
+        logger.info("消息总线已集成到SSH转发器")
 
     async def create_session(self, websocket: WebSocket, ssh_config: SSHConfig) -> str:
         """创建新的SSH会话"""
@@ -166,32 +175,31 @@ class SSHForwarder:
             logger.debug(
                 f"数据已发送到SSH [session_id={session_id}] [length={len(data)}]")
 
-    async def handle_message(self, session_id: str, message: str):
-        """处理WebSocket消息"""
+    async def handle_message(self, topic: str, data: Any) -> None:
+        """统一的消息处理接口"""
+        start_time = time.time()
         try:
-            data = json.loads(message)
-            message_type = data.get("type")
-            payload = data.get("payload", {})
-
-            handlers = {
-                "terminal_input": self._handle_terminal_input,
-                "resize": self._handle_resize,
-                "file_upload": self._handle_file_upload,
-                "file_download": self._handle_file_download,
-                "execute_command": self._handle_command,
-                "file_transfer": self._handle_file_transfer,
-                "stream_file": self._handle_stream_file
-            }
-
-            handler = handlers.get(message_type)
+            # 应用转换器
+            data = await self._transform_data(data)
+            
+            # 解析session_id和操作
+            session_id = topic.split('.')[1]
+            operation = topic.split('.')[-1]
+            
+            # 路由到对应处理函数
+            handler = self._get_operation_handler(operation)
             if handler:
-                await handler(session_id, payload)
+                await handler(session_id, data)
             else:
-                await self._send_error(session_id, f"Unknown message type: {message_type}")
-
+                raise ValueError(f"Unknown operation: {operation}")
+                
+            # 记录性能指标
+            self._metrics.record_message(time.time() - start_time)
+            
         except Exception as e:
-            logger.error(f"处理消息失败 [session_id={session_id}]: {str(e)}")
-            await self._send_error(session_id, str(e))
+            self._metrics.record_error()
+            logger.error(f"SSH message handling error: {e}")
+            raise
 
     async def resize_terminal(self, session_id: str, rows: int, cols: int):
         """调整终端大小"""

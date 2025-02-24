@@ -3,6 +3,7 @@ from typing import Optional, Dict, Any
 import time
 import json
 from .constants import MQTTQoS
+import asyncio
 
 @dataclass
 class RetryConfig:
@@ -20,6 +21,16 @@ class PerformanceMetrics:
         self.message_processing_time = 0
         self.retry_count = 0
         self.last_reset = time.time()
+        self._lock = asyncio.Lock()
+
+    async def update_async(self, success: bool, message_size: int, process_time: float):
+        async with self._lock:
+            self.publish_count += 1
+            if not success:
+                self.publish_failures += 1
+            self.message_size_total += message_size
+            self.message_processing_time += process_time
+            self.retry_count += (0 if success else 1)
 
     def reset(self):
         """重置指标"""

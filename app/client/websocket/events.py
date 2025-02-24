@@ -1,10 +1,12 @@
 import asyncio
-from typing import Dict, List, Callable, Any
+from typing import Dict, List, Callable, Any, AsyncGenerator
+from contextlib import asynccontextmanager
 from loguru import logger
+
 
 class EventManager:
     """事件管理器"""
-    
+
     def __init__(self):
         self._callbacks: Dict[str, List[Callable]] = {
             'connect': [],
@@ -15,6 +17,15 @@ class EventManager:
             'before_connect': [],
             'after_disconnect': []
         }
+
+    @asynccontextmanager
+    async def event_context(self, event: str, callback: Callable) -> AsyncGenerator[None, None]:
+        """事件回调的上下文管理器"""
+        self.add_callback(event, callback)
+        try:
+            yield
+        finally:
+            self.remove_callback(event, callback)
 
     def add_callback(self, event: str, callback: Callable) -> bool:
         """添加事件回调"""
@@ -33,12 +44,22 @@ class EventManager:
         return False
 
     async def trigger(self, event: str, *args, **kwargs) -> None:
-        """触发事件回调"""
-        for callback in self._callbacks.get(event, []):
-            try:
-                if asyncio.iscoroutinefunction(callback):
-                    await callback(*args, **kwargs)
-                else:
-                    callback(*args, **kwargs)
-            except Exception as e:
-                logger.error(f"Callback error for event {event}: {str(e)}")
+        """优化的事件触发器"""
+        callbacks = self._callbacks.get(event, [])
+        if not callbacks:
+            logger.debug(f"No callbacks registered for event: {event}")
+            return
+
+        tasks = []
+        for callback in callbacks:
+            if asyncio.iscoroutinefunction(callback):
+                tasks.append(asyncio.create_task(callback(*args, **kwargs)))
+            else:
+                tasks.append(asyncio.to_thread(callback, *args, **kwargs))
+
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error(
+                        f"Callback error for event {event}: {str(result)}")

@@ -1,7 +1,6 @@
 from typing import Any, Callable, Dict, List, Optional
 import asyncio
 from enum import Enum
-import logging
 from loguru import logger
 
 class EventPriority(Enum):

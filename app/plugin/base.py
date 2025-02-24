@@ -7,6 +7,7 @@ from .models import PluginMetadata, PluginState, PluginMetrics
 from .sandbox import PluginSandbox
 from .function import PluginFunction
 
+
 class Plugin(ABC):
     def __init__(self):
         self.metadata: PluginMetadata = None

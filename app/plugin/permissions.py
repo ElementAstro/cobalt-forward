@@ -1,6 +1,7 @@
 from typing import Set, Callable
 from functools import wraps
 
+
 class PluginPermission:
     """插件权限定义"""
     ADMIN = "admin"
@@ -9,6 +10,7 @@ class PluginPermission:
     SYSTEM = "system"
     DATABASE = "database"
     ALL = {ADMIN, FILE_IO, NETWORK, SYSTEM, DATABASE}
+
 
 def require_permission(permission: str):
     """权限检查装饰器"""

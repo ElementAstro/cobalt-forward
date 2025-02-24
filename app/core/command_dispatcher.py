@@ -11,6 +11,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from loguru import logger
 
+from app.core.base import BaseComponent
 from app.core.message_bus import MessageBus
 
 # Type variables for generic command handling
@@ -80,10 +81,9 @@ class CommandHandler(Protocol[T_Payload, T_Result]):
         pass
 
 
-class CommandTransmitter:
-    """High-performance command transmitter"""
-
+class CommandTransmitter(BaseComponent):
     def __init__(self, message_bus: MessageBus):
+        super().__init__()
         self._message_bus = message_bus
         self._handlers: Dict[Type[Command], CommandHandler] = {}
         self._active_commands: Dict[str, Command] = {}
@@ -94,6 +94,11 @@ class CommandTransmitter:
         self._metrics = CommandMetrics()
         self._command_states = {}
         self._command_locks = {}
+        self._protocol_converter = None
+        self._transformers = []
+        self._message_pool = asyncio.Queue(maxsize=1000)
+        self._worker_count = 2
+        self._workers = []
 
         logger.info("Initializing CommandTransmitter")
         logger.debug(f"ThreadPoolExecutor created with {10} workers")
@@ -107,12 +112,27 @@ class CommandTransmitter:
         logger.debug(
             f"Registered {len(self._middleware)} middleware functions")
 
+    async def start(self):
+        """启动命令处理器"""
+        self._workers = [
+            asyncio.create_task(self._process_command_pool())
+            for _ in range(self._worker_count)
+        ]
+
+    async def set_protocol_converter(self, converter):
+        """设置协议转换器"""
+        self._protocol_converter = converter
+
     async def register_handler(self, command_type: Type[Command], handler: CommandHandler) -> None:
         """Register a command handler"""
         self._handlers[command_type] = handler
         logger.info(
             f"Registered handler for command type: {command_type.__name__}")
         logger.debug(f"Total registered handlers: {len(self._handlers)}")
+
+    async def register_transformer(self, transformer):
+        """注册命令转换器"""
+        self._transformers.append(transformer)
 
     async def send(
         self,
@@ -140,6 +160,36 @@ class CommandTransmitter:
                 for middleware in self._middleware:
                     command = await middleware(command)
                     logger.trace(f"Applied middleware: {middleware.__name__}")
+
+                # 集成协议转换
+                if self._protocol_converter and isinstance(command.payload, dict):
+                    command.payload = await self._protocol_converter.to_wire_format(command.payload)
+
+                # 应用命令转换器
+                for transformer in self._transformers:
+                    command = await transformer.transform(command)
+
+                # 通过消息总线发布命令执行状态
+                await self._message_bus.publish(
+                    f"command.status.{command.context.command_id}",
+                    {
+                        "status": "started",
+                        "timestamp": time.time(),
+                        "command_type": type(command).__name__
+                    }
+                )
+
+                # 发布命令执行事件
+                if self._message_bus:
+                    await self._message_bus.publish(
+                        f"command.lifecycle.{command.context.command_id}",
+                        {
+                            "stage": "executing",
+                            "command_type": type(command).__name__,
+                            "timestamp": time.time(),
+                            "metadata": command.context.metadata
+                        }
+                    )
 
                 # Get appropriate handler
                 handler = self._handlers.get(type(command))
@@ -228,6 +278,23 @@ class CommandTransmitter:
             'state': state,
             'timestamp': time.time()
         }
+
+    async def handle_message(self, topic: str, data: Any) -> None:
+        """处理来自消息总线的消息"""
+        await self._message_pool.put((topic, data))
+
+    async def _process_command_pool(self):
+        """工作线程处理命令池"""
+        while True:
+            topic, data = await self._message_pool.get()
+            try:
+                # 应用转换和处理命令
+                data = await self._transform_data(data)
+                # ...执行命令处理逻辑...
+            except Exception as e:
+                logger.error(f"Command processing error: {e}")
+            finally:
+                self._message_pool.task_done()
 
     # Middleware implementations
     async def _logging_middleware(self, command: Command) -> Command:

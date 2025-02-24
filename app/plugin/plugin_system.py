@@ -1,3 +1,7 @@
+from .permissions import PluginPermission
+from .base import Plugin
+from .models import PluginMetadata, PluginState
+from typing import Dict, List, Any, Optional, Type
 import importlib
 import inspect
 from typing import Any, Dict, Generator, List, Type, Optional, Callable, Set, ContextManager
@@ -55,6 +59,7 @@ class PluginPermission:
 
 class PluginSandbox:
     """插件沙箱环境"""
+
     def __init__(self):
         self.memory_limit = 1024 * 1024 * 100  # 100MB
         self.cpu_time_limit = 30  # 30秒
@@ -67,7 +72,8 @@ class PluginSandbox:
         old_limits = resource.getrlimit(resource.RLIMIT_AS)
         try:
             # 设置内存限制
-            resource.setrlimit(resource.RLIMIT_AS, (self.memory_limit, self.memory_limit))
+            resource.setrlimit(resource.RLIMIT_AS,
+                               (self.memory_limit, self.memory_limit))
             yield
         finally:
             # 恢复原始限制
@@ -76,6 +82,7 @@ class PluginSandbox:
 
 class PluginMetrics:
     """插件性能指标"""
+
     def __init__(self):
         self.execution_times: List[float] = []
         self.memory_usage: List[float] = []
@@ -97,6 +104,7 @@ class PluginMetrics:
 
 class PluginFunction:
     """插件函数包装器"""
+
     def __init__(self, func: Callable, name: str = None, description: str = None):
         self.func = func
         self.name = name or func.__name__
@@ -104,7 +112,7 @@ class PluginFunction:
         self.type_hints = get_type_hints(func)
         self.signature = inspect.signature(func)
         self.is_coroutine = asyncio.iscoroutinefunction(func)
-        
+
         # 创建参数验证模型
         self.param_model = self._create_param_model()
 
@@ -213,7 +221,8 @@ class Plugin(ABC):
         if not hasattr(self.metadata, 'config_schema'):
             return True
         try:
-            jsonschema.validate(instance=config, schema=self.metadata.config_schema)
+            jsonschema.validate(
+                instance=config, schema=self.metadata.config_schema)
             return True
         except jsonschema.exceptions.ValidationError as e:
             logger.error(f"Config validation failed: {e}")
@@ -248,7 +257,7 @@ class Plugin(ABC):
             "functions": {},
             "types": {}
         }
-        
+
         # 收集函数信息
         for name, func in self._functions.items():
             schema["functions"][name] = {
@@ -265,7 +274,7 @@ class Plugin(ABC):
                 "return_type": str(func.type_hints.get("return", Any)),
                 "is_async": func.is_coroutine
             }
-        
+
         # 收集类型信息
         for name, type_class in self._exported_types.items():
             if hasattr(type_class, "__annotations__"):
@@ -275,7 +284,7 @@ class Plugin(ABC):
                         for field_name, field_type in type_class.__annotations__.items()
                     }
                 }
-        
+
         return schema
 
     def require_permission(self, permission: str):
@@ -284,7 +293,8 @@ class Plugin(ABC):
             @wraps(func)
             async def wrapper(*args, **kwargs):
                 if permission not in self._permissions:
-                    raise PermissionError(f"Plugin lacks permission: {permission}")
+                    raise PermissionError(
+                        f"Plugin lacks permission: {permission}")
                 return await func(*args, **kwargs)
             return wrapper
         return decorator
@@ -313,17 +323,6 @@ class Plugin(ABC):
         return messages
 
 
-from typing import Dict, List, Any, Optional, Type
-import importlib
-import os
-import asyncio
-import yaml
-from datetime import datetime
-from loguru import logger
-from .models import PluginMetadata, PluginState
-from .base import Plugin
-from .permissions import PluginPermission
-
 class PluginManager:
     def __init__(self, plugin_dir: str = "plugins", config_dir: str = "config/plugins"):
         self.plugin_dir = plugin_dir
@@ -344,27 +343,27 @@ class PluginManager:
         os.makedirs(plugin_dir, exist_ok=True)
         os.makedirs(config_dir, exist_ok=True)
 
+        # 添加插件缓存
+        self._plugin_cache: Dict[str, Any] = {}
+        self._config_cache: Dict[str, float] = {}
+        self._function_cache: Dict[str, Dict[str, PluginFunction]] = {}
+
+        # 使用异步锁保护关键操作
+        self._lock = asyncio.Lock()
+
+        # 优化线程池
+        self._thread_pool = ThreadPoolExecutor(
+            max_workers=min(32, (os.cpu_count() or 1) + 4),
+            thread_name_prefix="plugin_worker"
+        )
+
     async def load_plugins(self):
-        """加载所有插件"""
-        # 扫描插件目录
-        plugin_files = [f for f in os.listdir(self.plugin_dir)
-                        if f.endswith('.py') and not f.startswith('_')]
-
-        # 首先收集所有插件的元数据和依赖信息
-        for file in plugin_files:
-            plugin_name = file[:-3]
-            try:
-                await self._collect_plugin_metadata(plugin_name)
-            except Exception as e:
-                logger.error(
-                    f"Error collecting metadata for plugin {plugin_name}: {e}")
-
-        # 根据依赖关系和优先级排序
-        self._load_order = self._resolve_load_order()
-
-        # 按顺序加载插件
-        for plugin_name in self._load_order:
-            await self._load_plugin(plugin_name)
+        async with self._lock:
+            # 使用并发加载优化性能
+            tasks = []
+            for plugin_name in self._load_order:
+                tasks.append(self._load_plugin(plugin_name))
+            await asyncio.gather(*tasks)
 
     async def _collect_plugin_metadata(self, plugin_name: str):
         """收集插件元数据"""
@@ -405,11 +404,14 @@ class PluginManager:
         return order
 
     async def _load_plugin(self, plugin_name: str):
-        """加载单个插件"""
         try:
+            # 添加缓存检查
+            if plugin_name in self._plugin_cache:
+                return self._plugin_cache[plugin_name]
+
             # 执行预初始化钩子
             await self._execute_lifecycle_hooks(plugin_name, "pre_initialize")
-            
+
             # 加载插件模块
             module = importlib.import_module(
                 f"{self.plugin_dir}.{plugin_name}")
@@ -451,10 +453,10 @@ class PluginManager:
             # 添加文件哈希记录
             plugin_file = os.path.join(self.plugin_dir, f"{plugin_name}.py")
             self._file_hashes[plugin_name] = self._get_file_hash(plugin_file)
-            
+
             # 执行后初始化钩子
             await self._execute_lifecycle_hooks(plugin_name, "post_initialize")
-            
+
             # 初始化插件统计信息
             self.plugin_stats[plugin_name] = {
                 "load_time": datetime.now().timestamp(),
@@ -465,9 +467,13 @@ class PluginManager:
             # 初始化插件沙箱
             plugin._sandbox.allowed_modules = {'os.path', 'json', 'yaml'}
             plugin._sandbox.file_access_paths = {self.config_dir}
-            
+
             # 设置默认权限
             plugin._permissions = {PluginPermission.FILE_IO}
+
+            # 缓存插件实例
+            self._plugin_cache[plugin_name] = plugin
+            self._function_cache[plugin_name] = plugin._functions
 
             logger.success(f"Successfully loaded plugin: {plugin_name}")
 
@@ -508,19 +514,23 @@ class PluginManager:
         return results
 
     async def reload_plugin(self, plugin_name: str):
-        """重新加载插件"""
-        if plugin_name in self.plugins:
-            try:
-                await self.plugins[plugin_name].shutdown()
-                del self.plugins[plugin_name]
-                importlib.reload(importlib.import_module(
-                    f"{self.plugin_dir}.{plugin_name}"))
-                await self._load_plugin(plugin_name)
-                return True
-            except Exception as e:
-                logger.error(f"Error reloading plugin {plugin_name}: {e}")
-                return False
-        return False
+        async with self._lock:
+            if plugin_name in self.plugins:
+                # 清理缓存
+                self._plugin_cache.pop(plugin_name, None)
+                self._function_cache.pop(plugin_name, None)
+
+                try:
+                    await self.plugins[plugin_name].shutdown()
+                    del self.plugins[plugin_name]
+                    importlib.reload(importlib.import_module(
+                        f"{self.plugin_dir}.{plugin_name}"))
+                    await self._load_plugin(plugin_name)
+                    return True
+                except Exception as e:
+                    logger.error(f"Error reloading plugin {plugin_name}: {e}")
+                    return False
+            return False
 
     async def shutdown_plugins(self):
         """关闭所有插件"""
@@ -573,9 +583,11 @@ class PluginManager:
                     try:
                         health_status = await plugin.check_health()
                         if health_status["status"] != "healthy":
-                            logger.warning(f"Plugin {plugin_name} health check failed: {health_status}")
+                            logger.warning(
+                                f"Plugin {plugin_name} health check failed: {health_status}")
                     except Exception as e:
-                        logger.error(f"Health check failed for {plugin_name}: {e}")
+                        logger.error(
+                            f"Health check failed for {plugin_name}: {e}")
                 await asyncio.sleep(interval)
 
         self._health_check_task = asyncio.create_task(health_check_loop())
@@ -590,9 +602,10 @@ class PluginManager:
         try:
             plugin_file = os.path.join(self.plugin_dir, f"{plugin_name}.py")
             current_hash = self._get_file_hash(plugin_file)
-            
+
             if current_hash != self._file_hashes.get(plugin_name):
-                logger.info(f"Detected changes in plugin {plugin_name}, hot reloading...")
+                logger.info(
+                    f"Detected changes in plugin {plugin_name}, hot reloading...")
                 await self.reload_plugin(plugin_name)
                 self._file_hashes[plugin_name] = current_hash
                 return True
@@ -618,7 +631,8 @@ class PluginManager:
                     else:
                         hook()
                 except Exception as e:
-                    logger.error(f"Error executing {stage} hook for {plugin_name}: {e}")
+                    logger.error(
+                        f"Error executing {stage} hook for {plugin_name}: {e}")
 
     def get_plugin_info(self) -> Dict[str, Any]:
         """获取所有插件信息"""
@@ -644,19 +658,19 @@ class PluginManager:
 
     async def call_plugin_function(self, plugin_name: str, function_name: str, *args, **kwargs) -> Any:
         """调用插件函数"""
-        if plugin_name not in self.plugins:
-            raise ValueError(f"Plugin {plugin_name} not found")
-        
-        plugin = self.plugins[plugin_name]
-        func = plugin.get_function(function_name)
-        if not func:
-            raise ValueError(f"Function {function_name} not found in plugin {plugin_name}")
-        
-        try:
-            return await func(*args, **kwargs)
-        except Exception as e:
-            logger.error(f"Error calling {plugin_name}.{function_name}: {e}")
-            raise
+        # 使用缓存优化函数调用
+        if plugin_name in self._function_cache:
+            func = self._function_cache[plugin_name].get(function_name)
+            if func:
+                try:
+                    return await func(*args, **kwargs)
+                except Exception as e:
+                    logger.error(
+                        f"Error calling {plugin_name}.{function_name}: {e}")
+                    raise
+
+        raise ValueError(
+            f"Function {function_name} not found in plugin {plugin_name}")
 
     def get_plugin_api_schema(self, plugin_name: str) -> Dict[str, Any]:
         """获取插件API模式"""
@@ -721,3 +735,7 @@ class PluginManager:
                     "content": message,
                     "timestamp": time.time()
                 })
+
+    def __del__(self):
+        """清理资源"""
+        self._thread_pool.shutdown(wait=False)

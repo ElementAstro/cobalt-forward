@@ -36,19 +36,24 @@ class PacketProtocol:
     async def pack(data: Union[bytes, bytearray, memoryview],
                    compress: bool = False,
                    compression_level: int = 6) -> bytes:
-        """Pack data into packet format with compression level control"""
-        if compress:
-            loop = asyncio.get_event_loop()
-            data = await loop.run_in_executor(
-                PacketProtocol._compression_pool,
-                lambda: zlib.compress(data, level=compression_level)
-            )
-        checksum = zlib.crc32(data)
-        header = struct.pack(PacketProtocol.HEADER_FORMAT,
-                             PacketProtocol.MAGIC,
-                             len(data),
-                             checksum)
-        return header + data
+        """优化的数据打包方法"""
+        buf = PacketProtocol._get_buffer(len(data) + PacketProtocol.HEADER_SIZE)
+        try:
+            if compress and len(data) > 512:  # 只压缩大于512字节的数据
+                loop = asyncio.get_event_loop()
+                data = await loop.run_in_executor(
+                    PacketProtocol._compression_pool,
+                    lambda: zlib.compress(data, level=compression_level)
+                )
+            
+            checksum = zlib.crc32(data)
+            struct.pack_into(PacketProtocol.HEADER_FORMAT, buf, 0,
+                           PacketProtocol.MAGIC, len(data), checksum)
+            buf[PacketProtocol.HEADER_SIZE:PacketProtocol.HEADER_SIZE+len(data)] = data
+            
+            return bytes(buf[:PacketProtocol.HEADER_SIZE+len(data)])
+        finally:
+            PacketProtocol._return_buffer(buf)
 
     @staticmethod
     def unpack(packet: bytes) -> Optional[bytes]:

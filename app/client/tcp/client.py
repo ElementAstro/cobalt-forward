@@ -1,5 +1,7 @@
 import asyncio
 from typing import Optional, Callable, Any, List, Dict, TYPE_CHECKING
+from ..base import BaseClient, BaseConfig
+from dataclasses import dataclass
 
 if TYPE_CHECKING:
     from .client import TCPClient
@@ -15,39 +17,52 @@ from ...utils.performance import RateLimiter, async_performance_monitor
 
 
 class ConnectionPool:
-    """TCP Connection Pool"""
-
+    """优化的连接池实现"""
+    
     def __init__(self, size: int, config: ClientConfig):
         self.size = size
         self.config = config
-        self.connections: List[TCPClient] = []
-        self.active_connections: Dict[TCPClient, bool] = {}
+        self.connections = asyncio.Queue(maxsize=size)
+        self.semaphore = asyncio.Semaphore(size)
+        self._health_check_task = None
 
     async def initialize(self):
-        """Initialize connection pool"""
+        """优化的连接池初始化"""
         for _ in range(self.size):
             client = TCPClient(self.config)
             await client.connect()
-            self.connections.append(client)
-            self.active_connections[client] = True
+            await self.connections.put(client)
+        self._health_check_task = asyncio.create_task(self._health_check())
 
-    async def get_connection(self) -> TCPClient:
-        """Get available connection using round-robin"""
-        active = [c for c, status in self.active_connections.items() if status]
-        if not active:
-            raise ConnectionError("No active connections available")
-        return random.choice(active)
+    async def get_connection(self) -> 'TCPClient':
+        """优化的连接获取"""
+        async with self.semaphore:
+            client = await self.connections.get()
+            if not client.connected:
+                await client.connect()
+            return client
+
+    async def release_connection(self, client: 'TCPClient'):
+        """归还连接到连接池"""
+        await self.connections.put(client)
 
 
-class TCPClient:
+@dataclass
+class TCPConfig(BaseConfig):
+    max_packet_size: int = 65536
+    compression_enabled: bool = False
+    compression_level: int = -1
+    auto_reconnect: bool = True
+    heartbeat_interval: float = 30.0
+    advanced_settings: dict = None
+
+class TCPClient(BaseClient):
     """Enhanced TCP Client implementation with connection pooling"""
 
-    def __init__(self, config: ClientConfig):
-        self._config = config
-        self._reader: Optional[asyncio.StreamReader] = None
-        self._writer: Optional[asyncio.StreamWriter] = None
-        self._state = ClientState.DISCONNECTED
-        self._stats = ConnectionStats()
+    def __init__(self, config: TCPConfig):
+        super().__init__(config)
+        self._reader = None
+        self._writer = None
         self._buffer = PacketBuffer(config.max_packet_size)
         self._protocol = PacketProtocol()
         self._rate_limiter = RateLimiter(rate_limit=1000)
@@ -68,77 +83,59 @@ class TCPClient:
 
         logger.info(f"TCP client initialized for {config.host}:{config.port}")
 
-    async def connect(self) -> None:
-        """建立连接并配置socket"""
+    async def connect(self) -> bool:
+        """实现TCP连接"""
         try:
-            self._state = ClientState.CONNECTING
-
-            # 创建连接
             reader, writer = await asyncio.open_connection(
-                self._config.host,
-                self._config.port
+                self.config.host,
+                self.config.port
             )
-
-            # 配置socket
-            socket = writer.get_extra_info('socket')
-            for option, value in self._config.advanced_settings.items():
-                if hasattr(socket, f"set{option}"):
-                    getattr(socket, f"set{option}")(value)
-
             self._reader = reader
             self._writer = writer
-            self._state = ClientState.CONNECTED
-            self._stats.connection_time = asyncio.get_event_loop().time()
-
-            # 启动服务
-            if self._config.auto_reconnect:
-                await self.enable_auto_reconnect()
-            await self.start_heartbeat(self._config.heartbeat_interval)
-
-            self._trigger_callback('connected')
-            logger.success(
-                f"Connected to {self._config.host}:{self._config.port}")
-
-            # 启动写入循环
-            self._write_task = asyncio.create_task(self._write_loop())
-
+            self.connected = True
+            return True
         except Exception as e:
-            logger.error(f"Connection failed: {e}")
-            self._state = ClientState.ERROR
-            self._trigger_callback('error', e)
-            raise
+            logger.error(f"TCP connection failed: {str(e)}")
+            return False
+
+    async def disconnect(self) -> None:
+        """实现TCP断开连接"""
+        if self._writer:
+            self._writer.close()
+            await self._writer.wait_closed()
+        self.connected = False
 
     async def _write_loop(self):
-        """Batch write loop for better performance"""
+        """优化的批量写入循环"""
+        batch = []
         while True:
             try:
-                batch = []
-                batch_size = 0
-
-                # 收集批量数据
-                while batch_size < self._config.buffer_size:
+                data = await self._write_queue.get()
+                batch.append(data)
+                
+                # 尝试快速收集更多数据
+                while len(batch) < self._config.write_batch_size:
                     try:
                         data = await asyncio.wait_for(
                             self._write_queue.get(),
                             timeout=0.001
                         )
                         batch.append(data)
-                        batch_size += len(data)
                     except asyncio.TimeoutError:
                         break
-
+                
                 if batch:
-                    # 合并发送
                     combined_data = b''.join(batch)
                     await self._protected_send(combined_data)
-
+                    batch.clear()
+                    
             except Exception as e:
                 logger.error(f"Write loop error: {e}")
                 await asyncio.sleep(1)
 
-    async def send(self, data: bytes) -> None:
-        """Queue data for sending"""
-        await self._write_queue.put(data)
+    async def send(self, data: Any) -> bool:
+        """实现TCP数据发送"""
+        return await self.execute_with_retry(self._protected_send, data)
 
     async def _protected_send(self, data: bytes):
         """Protected send implementation"""
@@ -167,6 +164,12 @@ class TCPClient:
         except Exception as e:
             self._stats.errors += 1
             raise
+
+    async def receive(self) -> Optional[Any]:
+        """实现TCP数据接收"""
+        if not self._reader:
+            return None
+        return await self.execute_with_retry(self._reader.read, self.config.buffer_size)
 
     # ...existing code...
     # 保留之前实现的其他方法，如 disconnect(), receive(), 等

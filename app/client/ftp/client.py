@@ -1,4 +1,4 @@
-from typing import List
+from typing import Any, List, Optional
 from app.client.ftp.config import FTPConfig
 from app.client.ftp.exception import FTPError
 from app.client.ftp.operation import FileOperationEnhancer
@@ -14,7 +14,72 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 import queue
+from ..base import BaseClient, BaseConfig
+from dataclasses import dataclass
+import asyncio
+from pyftpdlib.handlers import FTPHandler
+from pyftpdlib.authorizers import DummyAuthorizer
+from functools import wraps
 
+@dataclass
+class FTPConfig(BaseConfig):
+    username: str = None
+    password: str = None
+    passive_ports: range = range(60000, 65535)
+    max_cons: int = 256
+    max_cons_per_ip: int = 5
+    masquerade_address: str = None
+
+class FTPClient(BaseClient):
+    """增强的FTP客户端实现"""
+
+    def __init__(self, config: FTPConfig):
+        super().__init__(config)
+        self.authorizer = DummyAuthorizer()
+        self.handler = None
+        self.server = None
+        self.transfer_monitor = TransferMonitor()
+        self._setup_logging()
+
+    async def connect(self) -> bool:
+        """实现FTP连接"""
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                self._connect_sync
+            )
+            self.connected = True
+            return True
+        except Exception as e:
+            logger.error(f"FTP connection failed: {str(e)}")
+            return False
+
+    async def disconnect(self) -> None:
+        """实现FTP断开连接"""
+        if self.server:
+            await asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                self.server.close_all
+            )
+        self.connected = False
+
+    async def send(self, data: Any) -> bool:
+        """实现FTP数据发送"""
+        return await self.execute_with_retry(self._send_file, data)
+
+    async def receive(self) -> Optional[Any]:
+        """实现FTP数据接收"""
+        return await self.execute_with_retry(self._receive_file)
+
+    def _connect_sync(self):
+        """同步连接实现"""
+        self.configure_handler()
+        self.server = FTPServer(
+            (self.config.host, self.config.port),
+            self.handler
+        )
+        self.server.max_cons = self.config.max_cons
+        self.server.max_cons_per_ip = self.config.max_cons_per_ip
 
 class EnhancedFTPServer:
     def __init__(self, config: FTPConfig):
@@ -246,3 +311,20 @@ class EnhancedFTPServer:
                 )
             finally:
                 self.return_connection(conn)
+
+def retry_operation(retries=3, delay=1):
+    """重试装饰器"""
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(retries):
+                try:
+                    return await func(*args, **kwargs)
+                except Exception as e:
+                    last_exception = e
+                    if attempt < retries - 1:
+                        await asyncio.sleep(delay)
+            raise last_exception
+        return wrapper
+    return decorator

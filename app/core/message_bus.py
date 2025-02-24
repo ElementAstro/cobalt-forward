@@ -9,6 +9,7 @@ from abc import ABC, abstractmethod
 
 from loguru import logger
 
+from app.core.base import BaseComponent
 from app.utils.error_handler import CircuitBreaker
 from app.utils.performance import RateLimiter, async_performance_monitor
 from app.client.tcp.client import ClientConfig, TCPClient
@@ -180,6 +181,42 @@ class MessageBus:
             backoff_factor=2.0,
             exceptions=(MessageDeliveryException,)
         )
+        self._command_dispatcher = None
+        self._protocol_converter = None
+        self._ssh_forwarder = None
+        self._components = {}
+        self._transformers = []
+        self._component_routes = {}
+        self._message_pool = asyncio.Queue(maxsize=10000)
+        self._worker_count = 4
+        self._workers = []
+
+    async def set_command_dispatcher(self, dispatcher):
+        """设置命令分发器"""
+        self._command_dispatcher = dispatcher
+        logger.info("命令分发器已集成到消息总线")
+
+    async def set_protocol_converter(self, converter):
+        """设置协议转换器"""
+        self._protocol_converter = converter
+        logger.info("协议转换器已集成到消息总线")
+
+    async def set_ssh_forwarder(self, forwarder):
+        """设置SSH转发器"""
+        self._ssh_forwarder = forwarder
+        logger.info("SSH转发器已集成到消息总线")
+
+    async def register_component(self, name: str, component: Any):
+        """注册组件到消息总线"""
+        self._components[name] = component
+        if hasattr(component, 'set_message_bus'):
+            await component.set_message_bus(self)
+        logger.info(f"组件 {name} 已注册到消息总线")
+
+    async def register_transformer(self, transformer):
+        """注册消息转换器"""
+        self._transformers.append(transformer)
+        logger.info(f"消息转换器 {transformer.__class__.__name__} 已注册")
 
     def _setup_error_handlers(self):
         """设置错误处理器"""
@@ -208,9 +245,12 @@ class MessageBus:
         pass
 
     async def start(self):
-        """Start the message bus"""
+        """启动消息总线和工作线程"""
         self._running = True
-        self._processing_task = asyncio.create_task(self._process_messages())
+        self._workers = [
+            asyncio.create_task(self._process_message_pool())
+            for _ in range(self._worker_count)
+        ]
 
     async def stop(self):
         """Stop the message bus"""
@@ -219,10 +259,48 @@ class MessageBus:
             await self._processing_task
             self._processing_task = None
 
+    async def _process_message_pool(self):
+        """工作线程处理消息池"""
+        while self._running:
+            try:
+                message = await self._message_pool.get()
+                await self._handle_message(message)
+                self._message_pool.task_done()
+            except Exception as e:
+                logger.error(f"Message processing error: {e}")
+
+    async def register_component(self, prefix: str, component: BaseComponent):
+        """注册组件和路由前缀"""
+        self._component_routes[prefix] = component
+        await component.set_message_bus(self)
+
     @error_boundary(error_handler=_error_handler)
     @async_performance_monitor()
     async def publish(self, topic: str, data: Any, priority: int = 0) -> None:
-        """Enhanced publish with error handling"""
+        """优化的消息发布"""
+        # 应用消息转换器
+        for transformer in self._transformers:
+            data = await transformer.transform(data)
+
+        # 按主题前缀路由到对应组件
+        prefix = topic.split('.')[0]
+        if prefix in self._components:
+            await self._components[prefix].handle_message(topic, data)
+            return
+
+        if self._protocol_converter and isinstance(data, dict):
+            data = await self._protocol_converter.to_wire_format(data)
+        
+        if topic.startswith('cmd.'):
+            if self._command_dispatcher:
+                await self._command_dispatcher.dispatch(topic[4:], data)
+                return
+
+        if topic.startswith('ssh.'):
+            if self._ssh_forwarder:
+                await self._ssh_forwarder.handle_message(topic[4:], data)
+                return
+
         if not await self._rate_limiter.acquire():
             raise MessageDeliveryException("Rate limit exceeded")
 
@@ -295,8 +373,12 @@ class MessageBus:
                 ) from e
 
     async def _handle_message(self, message: Message):
-        """Handle single message with error tracking"""
+        """Enhanced message handling with transformers"""
         try:
+            # 应用消息转换器
+            for transformer in self._transformers:
+                message.data = await transformer.transform(message.data)
+
             start_time = asyncio.get_event_loop().time()
 
             # 处理响应消息

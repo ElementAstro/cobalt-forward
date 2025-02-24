@@ -19,6 +19,8 @@ class SecurityEnhancer:
         self.jwt_secret = os.urandom(32)
         self._init_asymmetric_keys()
         self.key_rotation_interval = 3600  # 1小时轮换一次密钥
+        self._key_cache = {}
+        self._init_ciphers()
 
     def _init_asymmetric_keys(self):
         """初始化非对称密钥对"""
@@ -28,6 +30,16 @@ class SecurityEnhancer:
         )
         self.public_key = self.private_key.public_key()
 
+    def _init_ciphers(self):
+        """初始化加密器"""
+        self.aes_gcm = AESGCM(AESGCM.generate_key(bit_length=256))
+        self._update_key_timestamp = time.time()
+
+    @property
+    def needs_key_rotation(self) -> bool:
+        """检查是否需要密钥轮换"""
+        return time.time() - self._update_key_timestamp >= self.key_rotation_interval
+
     def create_ssl_context(self, cert_file: str, key_file: str) -> ssl.SSLContext:
         """创建SSL上下文"""
         context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
@@ -35,13 +47,20 @@ class SecurityEnhancer:
         return context
 
     def encrypt_file(self, file_path: str) -> str:
-        """加密文件"""
-        with open(file_path, 'rb') as file:
-            file_data = file.read()
-        encrypted_data = self.cipher_suite.encrypt(file_data)
+        """优化的文件加密"""
+        file_size = os.path.getsize(file_path)
+        if file_size > 10 * 1024 * 1024:  # 10MB
+            return self.encrypt_large_file(file_path)
+        return self._encrypt_small_file(file_path)
+
+    def _encrypt_small_file(self, file_path: str) -> str:
+        """小文件加密优化"""
         encrypted_path = f"{file_path}.encrypted"
-        with open(encrypted_path, 'wb') as file:
-            file.write(encrypted_data)
+        with open(file_path, 'rb') as source, open(encrypted_path, 'wb') as dest:
+            chunk_size = 64 * 1024  # 64KB chunks
+            while chunk := source.read(chunk_size):
+                encrypted_chunk = self.cipher_suite.encrypt(chunk)
+                dest.write(encrypted_chunk)
         return encrypted_path
 
     def decrypt_file(self, encrypted_file: str) -> str:

@@ -2,9 +2,11 @@ import json
 import zlib
 import time
 from typing import Any, Union, Dict
-from functools import wraps
+from functools import wraps, lru_cache
 from loguru import logger
+import asyncio
 
+@lru_cache(maxsize=1000)
 def validate_topic(topic: str) -> bool:
     """验证MQTT主题格式"""
     if not topic or len(topic) == 0:
@@ -46,6 +48,17 @@ def measure_time(func):
     def wrapper(*args, **kwargs):
         start = time.perf_counter()
         result = func(*args, **kwargs)
+        end = time.perf_counter()
+        logger.debug(f"{func.__name__} took {end - start:.3f} seconds")
+        return result
+    return wrapper
+
+async def async_measure_time(func):
+    """异步性能计时装饰器"""
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        result = await func(*args, **kwargs)
         end = time.perf_counter()
         logger.debug(f"{func.__name__} took {end - start:.3f} seconds")
         return result
