@@ -21,6 +21,7 @@ from pyftpdlib.handlers import FTPHandler
 from pyftpdlib.authorizers import DummyAuthorizer
 from functools import wraps
 
+
 @dataclass
 class FTPConfig(BaseConfig):
     username: str = None
@@ -29,6 +30,7 @@ class FTPConfig(BaseConfig):
     max_cons: int = 256
     max_cons_per_ip: int = 5
     masquerade_address: str = None
+
 
 class FTPClient(BaseClient):
     """增强的FTP客户端实现"""
@@ -80,6 +82,7 @@ class FTPClient(BaseClient):
         )
         self.server.max_cons = self.config.max_cons
         self.server.max_cons_per_ip = self.config.max_cons_per_ip
+
 
 class EnhancedFTPServer:
     def __init__(self, config: FTPConfig):
@@ -245,10 +248,10 @@ class EnhancedFTPServer:
         try:
             logger.info(f"Starting secure upload: {local_path}")
             self.transfer_monitor.start_monitoring()
-            
+
             # 加密文件
             encrypted_path = self.security.encrypt_file(local_path)
-            
+
             # 注册可恢复传输
             transfer_id = self.resumable_manager.register_transfer(
                 encrypted_path, remote_path, os.path.getsize(encrypted_path)
@@ -256,12 +259,12 @@ class EnhancedFTPServer:
 
             # 执行上传
             self.upload_file(encrypted_path, remote_path)
-            
+
             # 记录传输完成
             self.transfer_monitor.stop_monitoring()
             stats = self.transfer_monitor.get_statistics()
             logger.info(f"Upload statistics: {stats}")
-            
+
             return transfer_id
         finally:
             if 'encrypted_path' in locals():
@@ -273,15 +276,20 @@ class EnhancedFTPServer:
         for file_path in file_list:
             try:
                 if action == "upload":
-                    result = self.secure_upload(file_path, kwargs.get("remote_dir"))
+                    result = self.secure_upload(
+                        file_path, kwargs.get("remote_dir"))
                 elif action == "download":
-                    result = self.download_with_verification(file_path, kwargs.get("local_dir"))
+                    result = self.download_with_verification(
+                        file_path, kwargs.get("local_dir"))
                 elif action == "sync":
-                    result = self.synchronize_directories(file_path, kwargs.get("remote_dir"))
-                results.append({"file": file_path, "status": "success", "result": result})
+                    result = self.synchronize_directories(
+                        file_path, kwargs.get("remote_dir"))
+                results.append(
+                    {"file": file_path, "status": "success", "result": result})
             except Exception as e:
                 logger.error(f"Failed to process {file_path}: {str(e)}")
-                results.append({"file": file_path, "status": "failed", "error": str(e)})
+                results.append(
+                    {"file": file_path, "status": "failed", "error": str(e)})
         return results
 
     def parallel_upload(self, file_list: List[str], remote_dir: str, max_workers: int = 5):
@@ -289,7 +297,8 @@ class EnhancedFTPServer:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = []
             for file_path in file_list:
-                future = executor.submit(self.secure_upload, file_path, remote_dir)
+                future = executor.submit(
+                    self.secure_upload, file_path, remote_dir)
                 futures.append(future)
             return [f.result() for f in futures]
 
@@ -311,6 +320,7 @@ class EnhancedFTPServer:
                 )
             finally:
                 self.return_connection(conn)
+
 
 def retry_operation(retries=3, delay=1):
     """重试装饰器"""

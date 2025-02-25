@@ -23,6 +23,7 @@ from .utils import get_local_files, get_file_hash
 from ..base import BaseClient, BaseConfig
 from dataclasses import dataclass
 
+
 @dataclass
 class SSHConfig(BaseConfig):
     username: str
@@ -33,9 +34,10 @@ class SSHConfig(BaseConfig):
     pool: bool = False
     keep_alive_interval: int = 30
 
+
 class SSHClient(BaseClient):
     """增强的SSH客户端实现"""
-    
+
     def __init__(self, config: SSHConfig):
         super().__init__(config)
         self.ssh = None
@@ -45,13 +47,25 @@ class SSHClient(BaseClient):
         self._file_cache = {}
         self._cache_timeout = 300  # 5分钟缓存
         self._executor = ThreadPoolExecutor(max_workers=5)
-        
+        self._sftp_client = None
+        self._lock = Lock()
+
     async def connect(self) -> bool:
         """实现SSH连接"""
+        if self.connected:
+            return True
+
         try:
+            if self.pool:
+                # 从连接池获取连接
+                self.ssh = self.pool.get_client()
+                self.connected = True
+                return True
+
+            # 直接连接
             self.ssh = paramiko.SSHClient()
             self.ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            
+
             connect_kwargs = {
                 'hostname': self.config.host,
                 'port': self.config.port,
@@ -68,25 +82,49 @@ class SSHClient(BaseClient):
 
             await asyncio.get_event_loop().run_in_executor(
                 self._executor,
-                self.ssh.connect,
-                **connect_kwargs
+                lambda: self.ssh.connect(**connect_kwargs)
             )
-            
+
+            # 设置keepalive
+            if self.config.keep_alive_interval > 0:
+                transport = self.ssh.get_transport()
+                if transport:
+                    transport.set_keepalive(self.config.keep_alive_interval)
+
             self.connected = True
             return True
-            
+
         except Exception as e:
-            logger.error(f"SSH connection failed: {str(e)}")
+            logger.error(f"SSH连接失败: {str(e)}")
+            self.connected = False
             return False
 
     async def disconnect(self) -> None:
         """实现SSH断开连接"""
-        if self.ssh:
-            await asyncio.get_event_loop().run_in_executor(
-                self._executor,
-                self.ssh.close
-            )
-        self.connected = False
+        if not self.connected:
+            return
+
+        try:
+            if self.pool and self.ssh:
+                await asyncio.get_event_loop().run_in_executor(
+                    self._executor,
+                    lambda: self.pool.release_client(self.ssh)
+                )
+            elif self.ssh:
+                await asyncio.get_event_loop().run_in_executor(
+                    self._executor,
+                    self.ssh.close
+                )
+
+            if self._sftp_client:
+                await asyncio.get_event_loop().run_in_executor(
+                    self._executor,
+                    self._sftp_client.close
+                )
+                self._sftp_client = None
+        finally:
+            self.connected = False
+            self.ssh = None
 
     async def send(self, data: Any) -> bool:
         """实现SSH数据发送"""
@@ -137,46 +175,58 @@ class SSHClient(BaseClient):
 
     async def execute_command(self, command: str) -> Dict[str, str]:
         """优化的命令执行实现"""
-        async with asyncio.Lock():
-            try:
-                return await asyncio.wait_for(
-                    self._execute_command(command),
-                    timeout=self.config.timeout
-                )
-            except asyncio.TimeoutError:
-                raise SSHException("命令执行超时")
+        if not self.connected:
+            raise SSHException("SSH未连接")
 
-    async def _execute_command(self, command: str) -> Dict[str, str]:
-        stdin, stdout, stderr = await asyncio.get_event_loop().run_in_executor(
-            self._executor,
-            self.ssh.exec_command,
-            command,
-            self.config.timeout
-        )
-        
-        results = await asyncio.gather(
-            self._read_stream(stdout),
-            self._read_stream(stderr)
-        )
-        
-        return {
-            'stdout': results[0],
-            'stderr': results[1],
-            'exit_code': stdout.channel.recv_exit_status()
-        }
+        try:
+            stdin, stdout, stderr = await asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                lambda: self.ssh.exec_command(
+                    command,
+                    timeout=self.config.timeout,
+                    get_pty=False
+                )
+            )
+
+            # 并行读取stdout和stderr
+            stdout_data, stderr_data = await asyncio.gather(
+                self._read_stream(stdout),
+                self._read_stream(stderr)
+            )
+
+            # 获取退出状态
+            exit_code = await asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                lambda: stdout.channel.recv_exit_status()
+            )
+
+            return {
+                'stdout': stdout_data,
+                'stderr': stderr_data,
+                'exit_code': exit_code
+            }
+        except Exception as e:
+            logger.error(f"执行命令失败: {command}, 错误: {str(e)}")
+            # 检查连接是否需要重连
+            if isinstance(e, (paramiko.SSHException, EOFError, ConnectionError)):
+                self.connected = False
+            raise SSHException(f"执行命令失败: {str(e)}") from e
 
     @staticmethod
     async def _read_stream(stream) -> str:
-        """异步读取流数据"""
+        """异步高效读取流数据"""
         output = []
-        while True:
-            line = await asyncio.get_event_loop().run_in_executor(
-                None,
-                stream.readline
-            )
-            if not line:
-                break
-            output.append(line)
+
+        async def read_all():
+            data = await asyncio.get_event_loop().run_in_executor(None, stream.read)
+            return data.decode('utf-8', errors='replace')
+
+        try:
+            data = await asyncio.wait_for(read_all(), timeout=30)
+            output.append(data)
+        except asyncio.TimeoutError:
+            output.append("[读取超时]")
+
         return ''.join(output)
 
     async def bulk_execute(self, commands: List[str]) -> List[Dict[str, Any]]:
@@ -187,81 +237,248 @@ class SSHClient(BaseClient):
         return results
 
     async def upload_file(self, local_path: str, remote_path: str,
-                         callback: Optional[Callable] = None):
+                          callback: Optional[Callable] = None):
         """优化的文件上传实现"""
+        if not self.connected:
+            raise SSHException("SSH未连接")
+
+        # 增加文件检查
+        if not os.path.exists(local_path):
+            raise FileNotFoundError(f"本地文件不存在: {local_path}")
+
         file_size = os.path.getsize(local_path)
-        
+
+        # 大文件使用压缩
         if file_size > 10 * 1024 * 1024:  # 10MB以上使用压缩
             await self._upload_compressed(local_path, remote_path, callback)
             return
-            
+
         # 使用异步IO
-        async with asyncio.Lock():
-            sftp = await self._get_sftp()
-            try:
-                await asyncio.get_event_loop().run_in_executor(
-                    self._executor,
-                    lambda: sftp.put(local_path, remote_path, callback=callback)
-                )
-            finally:
-                sftp.close()
+        sftp = await self._get_sftp()
+        try:
+            # 确保远程目录存在
+            remote_dir = os.path.dirname(remote_path)
+            await self._ensure_remote_dir(sftp, remote_dir)
+
+            # 计算上传进度的回调包装器
+            progress_callback = None
+            if callback:
+                def progress_wrapper(transferred, total):
+                    percentage = (transferred / total) * 100
+                    callback(local_path, remote_path, percentage)
+                progress_callback = progress_wrapper
+
+            # 上传文件
+            await asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                lambda: sftp.put(local_path, remote_path,
+                                 callback=progress_callback)
+            )
+        except Exception as e:
+            logger.error(
+                f"文件上传失败: {local_path} -> {remote_path}, 错误: {str(e)}")
+            raise SSHException(f"文件上传失败: {str(e)}") from e
 
     async def _get_sftp(self):
         """获取SFTP客户端，带缓存"""
-        if not hasattr(self, '_sftp_client'):
-            self._sftp_client = self.ssh.open_sftp()
-        return self._sftp_client
+        if not self.connected:
+            raise SSHException("SSH未连接")
 
-    def _upload_compressed(self, local_path: str, remote_path: str,
-                           callback: Optional[Callable] = None):
+        async with asyncio.Lock():
+            if not self._sftp_client:
+                self._sftp_client = await asyncio.get_event_loop().run_in_executor(
+                    self._executor,
+                    self.ssh.open_sftp
+                )
+            return self._sftp_client
+
+    async def _ensure_remote_dir(self, sftp, remote_dir: str):
+        """确保远程目录存在，不存在则创建"""
+        try:
+            await asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                lambda: sftp.stat(remote_dir)
+            )
+        except FileNotFoundError:
+            # 递归创建目录
+            parent_dir = os.path.dirname(remote_dir)
+            if parent_dir and parent_dir != '/':
+                await self._ensure_remote_dir(sftp, parent_dir)
+
+            try:
+                await asyncio.get_event_loop().run_in_executor(
+                    self._executor,
+                    lambda: sftp.mkdir(remote_dir)
+                )
+            except Exception as e:
+                # 忽略目录已存在错误，可能是并发创建
+                if "exists" not in str(e).lower():
+                    raise
+
+    async def _upload_compressed(self, local_path: str, remote_path: str,
+                                 callback: Optional[Callable] = None):
         """上传压缩文件"""
         compressed_path = f"{local_path}.gz"
-        with open(local_path, 'rb') as f_in, gzip.open(compressed_path, 'wb') as f_out:
+        try:
+            # 压缩文件
+            await asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                lambda: self._compress_file(local_path, compressed_path)
+            )
+
+            # 上传压缩文件
+            sftp = await self._get_sftp()
+            compressed_remote_path = f"{remote_path}.gz"
+
+            # 确保远程目录存在
+            remote_dir = os.path.dirname(remote_path)
+            await self._ensure_remote_dir(sftp, remote_dir)
+
+            # 计算上传进度的回调包装器
+            progress_callback = None
+            if callback:
+                def progress_wrapper(transferred, total):
+                    percentage = (transferred / total) * 100
+                    callback(local_path, remote_path, percentage)
+                progress_callback = progress_wrapper
+
+            # 上传压缩文件
+            await asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                lambda: sftp.put(
+                    compressed_path, compressed_remote_path, callback=progress_callback)
+            )
+
+            # 在远程解压文件
+            decompress_cmd = f"gunzip -c {compressed_remote_path} > {remote_path} && rm {compressed_remote_path}"
+            await self.execute_command(decompress_cmd)
+
+        finally:
+            # 清理临时压缩文件
+            if os.path.exists(compressed_path):
+                os.remove(compressed_path)
+
+    @staticmethod
+    def _compress_file(source_path: str, dest_path: str):
+        """压缩文件"""
+        with open(source_path, 'rb') as f_in, gzip.open(dest_path, 'wb', compresslevel=6) as f_out:
             shutil.copyfileobj(f_in, f_out)
-        self.upload_file(compressed_path, remote_path, callback)
-        os.remove(compressed_path)
 
-    def get_remote_file_size(self, path: str) -> int:
-        """获取远程文件大小"""
-        sftp = self.ssh.open_sftp()
-        file_size = sftp.stat(path).st_size
-        sftp.close()
-        return file_size
+    async def download_file(self, remote_path: str, local_path: str,
+                            callback: Optional[Callable] = None):
+        """优化的文件下载实现"""
+        if not self.connected:
+            raise SSHException("SSH未连接")
 
-    @property
-    def is_connected(self) -> bool:
-        """检查是否已连接"""
-        return self.connected
+        # 确保本地目录存在
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
 
-    def close(self):
-        """关闭SSH连接"""
-        if hasattr(self, 'ssh'):
-            self.ssh.close()
-        self.connected = False
+        sftp = await self._get_sftp()
+        try:
+            # 获取远程文件大小
+            file_attrs = await asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                lambda: sftp.stat(remote_path)
+            )
+            file_size = file_attrs.st_size
 
-    def get_system_info(self) -> Dict[str, Any]:
-        """获取系统信息"""
-        return self.execute_command("uname -a")
-
-    def _setup_logging(self):
-        """设置日志"""
-        self.logger = logging.getLogger('SSHClient')
-        handler = logging.StreamHandler()
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        handler.setFormatter(formatter)
-        self.logger.addHandler(handler)
-        self.logger.setLevel(logging.DEBUG)
-
-    def connect_with_retry(self) -> None:
-        """重试连接"""
-        for _ in range(self.config.retry_attempts):
-            try:
-                self.connect()
+            # 大文件使用压缩
+            if file_size > 10 * 1024 * 1024:  # 10MB以上使用压缩
+                await self._download_compressed(remote_path, local_path, callback)
                 return
-            except Exception as e:
-                self.logger.error(f"连接失败，重试中: {str(e)}")
-                time.sleep(self.config.retry_interval)
-        raise SSHException("重试连接失败")
+
+            # 计算下载进度的回调包装器
+            progress_callback = None
+            if callback:
+                def progress_wrapper(transferred, total):
+                    percentage = (transferred / total) * 100
+                    callback(remote_path, local_path, percentage)
+                progress_callback = progress_wrapper
+
+            # 下载文件
+            await asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                lambda: sftp.get(remote_path, local_path,
+                                 callback=progress_callback)
+            )
+        except Exception as e:
+            logger.error(
+                f"文件下载失败: {remote_path} -> {local_path}, 错误: {str(e)}")
+            # 清理不完整的下载文件
+            if os.path.exists(local_path):
+                os.remove(local_path)
+            raise SSHException(f"文件下载失败: {str(e)}") from e
+
+    async def _download_compressed(self, remote_path: str, local_path: str,
+                                   callback: Optional[Callable] = None):
+        """下载压缩文件"""
+        # 压缩临时文件名
+        compressed_remote_path = f"{remote_path}.gz"
+        compressed_local_path = f"{local_path}.gz"
+
+        try:
+            # 在远程压缩文件
+            compress_cmd = f"gzip -c {remote_path} > {compressed_remote_path}"
+            result = await self.execute_command(compress_cmd)
+            if result['exit_code'] != 0:
+                raise SSHException(f"远程压缩失败: {result['stderr']}")
+
+            # 下载压缩文件
+            sftp = await self._get_sftp()
+
+            # 计算下载进度的回调包装器
+            progress_callback = None
+            if callback:
+                def progress_wrapper(transferred, total):
+                    percentage = (transferred / total) * 100
+                    callback(remote_path, local_path, percentage)
+                progress_callback = progress_wrapper
+
+            # 下载压缩文件
+            await asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                lambda: sftp.get(
+                    compressed_remote_path, compressed_local_path, callback=progress_callback)
+            )
+
+            # 本地解压
+            with gzip.open(compressed_local_path, 'rb') as f_in, open(local_path, 'wb') as f_out:
+                shutil.copyfileobj(f_in, f_out)
+
+            # 删除远程临时文件
+            await self.execute_command(f"rm -f {compressed_remote_path}")
+
+        finally:
+            # 清理本地临时文件
+            if os.path.exists(compressed_local_path):
+                os.remove(compressed_local_path)
+
+    def exec_command(self, command: str, timeout: float = None, get_pty: bool = False) -> Dict[str, Any]:
+        """
+        同步执行命令（为兼容性保留）
+        """
+        if not self.connected:
+            raise SSHException("SSH未连接")
+
+        actual_timeout = timeout or self.config.timeout
+        try:
+            stdin, stdout, stderr = self.ssh.exec_command(
+                command, timeout=actual_timeout, get_pty=get_pty)
+
+            exit_status = stdout.channel.recv_exit_status()
+            stdout_data = stdout.read().decode('utf-8', errors='replace')
+            stderr_data = stderr.read().decode('utf-8', errors='replace')
+
+            return {
+                'stdout': stdout_data,
+                'stderr': stderr_data,
+                'exit_code': exit_status
+            }
+        except Exception as e:
+            logger.error(f"执行命令失败: {command}, 错误: {str(e)}")
+            if isinstance(e, (paramiko.SSHException, EOFError, ConnectionError)):
+                self.connected = False
+            raise SSHException(f"执行命令失败: {str(e)}") from e
 
     def execute_command_stream(
         self,
@@ -355,14 +572,16 @@ class SSHClient(BaseClient):
         deleted_files = []
 
         for local_file in local_files:
-            remote_file = os.path.join(remote_dir, os.path.relpath(local_file, local_dir))
+            remote_file = os.path.join(
+                remote_dir, os.path.relpath(local_file, local_dir))
             if self._files_different(local_file, remote_file):
                 self.upload_file(local_file, remote_file)
                 uploaded_files.append(remote_file)
 
         if delete:
             for remote_file in remote_files:
-                local_file = os.path.join(local_dir, os.path.relpath(remote_file, remote_dir))
+                local_file = os.path.join(
+                    local_dir, os.path.relpath(remote_file, remote_dir))
                 if local_file not in local_files:
                     self.ssh.exec_command(f"rm -f {remote_file}")
                     deleted_files.append(remote_file)
@@ -410,7 +629,8 @@ class SSHClient(BaseClient):
     ) -> None:
         """转发远程端口"""
         transport = self.ssh.get_transport()
-        transport.request_port_forward(local_host, local_port, remote_host, remote_port)
+        transport.request_port_forward(
+            local_host, local_port, remote_host, remote_port)
 
     def create_remote_tunnel(
         self,
@@ -420,7 +640,8 @@ class SSHClient(BaseClient):
     ) -> None:
         """创建远程隧道"""
         transport = self.ssh.get_transport()
-        transport.request_port_forward(local_host, local_port, 'localhost', remote_port)
+        transport.request_port_forward(
+            local_host, local_port, 'localhost', remote_port)
 
     def monitor_file(
         self,

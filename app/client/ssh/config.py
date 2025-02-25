@@ -1,11 +1,13 @@
 from dataclasses import dataclass
 from typing import Optional
 
+
 @dataclass
 class PoolConfig:
     min_size: int = 2
     max_size: int = 10
     timeout: float = 30.0
+
 
 @dataclass
 class SSHConfig:

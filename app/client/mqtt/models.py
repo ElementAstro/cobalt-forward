@@ -1,9 +1,10 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 import time
 import json
 from .constants import MQTTQoS
 import asyncio
+
 
 @dataclass
 class RetryConfig:
@@ -12,16 +13,25 @@ class RetryConfig:
     retry_interval: float = 1.0
     retry_backoff: float = 1.5
 
+
+@dataclass
 class PerformanceMetrics:
-    """性能指标类"""
-    def __init__(self):
-        self.publish_count = 0
-        self.publish_failures = 0
-        self.message_size_total = 0
-        self.message_processing_time = 0
-        self.retry_count = 0
-        self.last_reset = time.time()
-        self._lock = asyncio.Lock()
+    """优化的性能指标类"""
+    publish_count: int = 0
+    publish_failures: int = 0
+    message_size_total: int = 0
+    message_processing_time: float = 0
+    retry_count: int = 0
+    last_reset: float = field(default_factory=time.time)
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    @property
+    def average_message_size(self) -> float:
+        return self.message_size_total / max(1, self.publish_count)
+
+    @property
+    def success_rate(self) -> float:
+        return 1 - (self.publish_failures / max(1, self.publish_count))
 
     async def update_async(self, success: bool, message_size: int, process_time: float):
         async with self._lock:
@@ -35,6 +45,7 @@ class PerformanceMetrics:
     def reset(self):
         """重置指标"""
         self.__init__()
+
 
 @dataclass
 class MQTTConfig:
@@ -53,7 +64,7 @@ class MQTTConfig:
     message_cache_size: int = 1000
     batch_size: int = 100
     heartbeat_interval: int = 30
-    
+
     def validate(self) -> bool:
         """验证配置有效性"""
         if not self.broker or not self.client_id:
@@ -62,19 +73,16 @@ class MQTTConfig:
             return False
         return True
 
+
+@dataclass(frozen=True)
 class MQTTMessage:
-    """MQTT消息封装类"""
-    def __init__(self, 
-                 topic: str, 
-                 payload: Any, 
-                 qos: MQTTQoS = MQTTQoS.AT_MOST_ONCE,
-                 retain: bool = False):
-        self.topic = topic
-        self.payload = payload
-        self.qos = qos
-        self.retain = retain
-        self.timestamp = time.time()
-        self.message_id = None
+    """不可变的MQTT消息类"""
+    topic: str
+    payload: Any
+    qos: MQTTQoS = MQTTQoS.AT_MOST_ONCE
+    retain: bool = False
+    timestamp: float = field(default_factory=time.time)
+    message_id: Optional[str] = None
 
     def to_json(self) -> str:
         return json.dumps({

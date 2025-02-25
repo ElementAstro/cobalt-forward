@@ -13,6 +13,8 @@ from ..base import BaseClient, BaseConfig
 from dataclasses import dataclass
 import paho.mqtt.client as mqtt
 import asyncio
+import aiocache
+from .utils import measure_time, async_measure_time
 
 
 @dataclass
@@ -404,3 +406,77 @@ class MQTTClient:
                 f"Failed to subscribe to pattern {pattern}")
 
         return True
+
+
+class MQTTClient:
+    def __init__(self, config: MQTTConfig):
+        self.config = config
+        self._validate_config()
+
+        # 核心组件初始化
+        self.client = self._create_mqtt_client()
+        self._executor = ThreadPoolExecutor(max_workers=4)
+        self._cache = aiocache.Cache(ttl=300)
+        self._metrics = PerformanceMetrics()
+        self._connection_lock = asyncio.Lock()
+        self._message_queue = asyncio.Queue()
+        self._batch_queue = asyncio.Queue(maxsize=config.batch_size)
+        self._retry_queue = asyncio.PriorityQueue()
+
+        # 状态标志
+        self._stopping = False
+        self._connected = False
+        self._tasks = []
+
+        self._setup_client()
+
+    async def __aenter__(self):
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.disconnect()
+
+    @async_measure_time
+    async def connect(self) -> bool:
+        async with self._connection_lock:
+            try:
+                # 使用线程执行器处理阻塞操作
+                await asyncio.get_event_loop().run_in_executor(
+                    self._executor,
+                    self._connect_sync
+                )
+                self._connected = True
+                self._start_background_tasks()
+                return True
+            except Exception as e:
+                logger.error(f"Connection failed: {e}")
+                return False
+
+    @async_measure_time
+    async def publish(self, message: MQTTMessage) -> bool:
+        if not self._connected:
+            raise ConnectionError("Client not connected")
+
+        try:
+            return await self._publish_with_retry(message)
+        except Exception as e:
+            logger.error(f"Publish error: {e}")
+            return False
+
+    async def _publish_with_retry(self, message: MQTTMessage) -> bool:
+        retries = 0
+        while retries < self.config.retry_config.max_retries:
+            try:
+                success = await self._publish_single(message)
+                if success:
+                    return True
+            except Exception as e:
+                logger.warning(f"Publish attempt {retries + 1} failed: {e}")
+
+            retries += 1
+            await asyncio.sleep(self.config.retry_config.retry_interval)
+
+        return False
+
+    # ... existing code ...

@@ -1,10 +1,12 @@
 from enum import Enum
 
+
 class MQTTQoS(Enum):
     """MQTT QoS级别"""
     AT_MOST_ONCE = 0
     AT_LEAST_ONCE = 1
     EXACTLY_ONCE = 2
+
 
 # MQTT 状态码
 MQTT_CONNECTION_CODES = {
