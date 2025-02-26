@@ -36,6 +36,9 @@ from app.client.ssh.config import SSHConfig
 from app.client.ftp.client import EnhancedFTPServer
 from app.client.ftp.config import FTPConfig
 from app.client.ftp.exception import FTPError
+# 添加集成管理器导入
+from app.core.integration_manager import IntegrationManager, ComponentType
+from app.core.event_bus import EventBus, EventPriority
 
 # 设置日志
 logger = setup_logging()
@@ -555,42 +558,134 @@ class EnhancedTCPWebSocketForwarder:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 初始化配置管理器
-    app.state.config_manager = ConfigManager(
-        config_path="config/config.yaml",
-        encrypt=True
+    """应用生命周期管理"""
+    logger.info("应用启动中...")
+    
+    # 创建集成管理器
+    integration_manager = IntegrationManager(config_path="config.yaml")
+    app.state.integration_manager = integration_manager
+    
+    # 初始化事件总线
+    event_bus = EventBus()
+    await integration_manager.register_component(
+        "event_bus", 
+        event_bus, 
+        ComponentType.EVENT_BUS
     )
-    await app.state.config_manager.load_config()
-    app.state.config_manager.start_hot_reload()
+    
+    # 创建并注册TCP客户端
+    config = app.state.forwarder_config if hasattr(app.state, "forwarder_config") else {}
+    tcp_config = ClientConfig(
+        host=getattr(config, "tcp_host", "localhost"),
+        port=getattr(config, "tcp_port", 8080),
+        timeout=getattr(config, "tcp_timeout", 30.0),
+        retry_attempts=getattr(config, "tcp_retry_attempts", 3)
+    )
+    tcp_client = MessageBusEnabledTCPClient(tcp_config)
+    
+    # 注册消息总线
+    await integration_manager.register_component(
+        "message_bus", 
+        tcp_client.message_bus if hasattr(tcp_client, "message_bus") else MessageBus(tcp_client), 
+        ComponentType.MESSAGE_BUS
+    )
+    
+    # 初始化命令分发器
+    command_transmitter = CommandTransmitter(tcp_client.message_bus)
+    await integration_manager.register_component(
+        "command_transmitter", 
+        command_transmitter, 
+        ComponentType.CUSTOM,
+        dependencies=["message_bus"]
+    )
     
     # 初始化插件管理器
-    app.state.plugin_manager = PluginManager("plugins", "config/plugins")
-    # 初始化配置管理器
-    app.state.config_manager = ConfigManager()
-
-    config = EnhancedForwarderConfig(
-        tcp_host="localhost",
-        tcp_port=8080,
-        websocket_host="0.0.0.0",
-        websocket_port=8000
+    plugin_manager = PluginManager()
+    await integration_manager.register_component(
+        "plugin_manager", 
+        plugin_manager, 
+        ComponentType.CUSTOM
     )
-    app.forwarder = EnhancedTCPWebSocketForwarder(config)
-
-    # 加载插件
-    await app.state.plugin_manager.load_plugins()
-    # 启动插件监控
-    await app.state.plugin_manager.start_health_monitor()
-    # 启动插件文件监视
-    await app.state.plugin_manager.start_plugin_watcher()
-
-    await app.forwarder.initialize()
+    
+    # 添加SSH客户端
+    if getattr(config, "ssh_enabled", False):
+        ssh_config = SSHConfig(
+            host=getattr(config, "ssh_host", "localhost"),
+            port=getattr(config, "ssh_port", 22),
+            username=getattr(config, "ssh_username", ""),
+            password=getattr(config, "ssh_password", ""),
+            key_path=getattr(config, "ssh_key_path", None),
+            known_hosts=getattr(config, "ssh_known_hosts", None)
+        )
+        ssh_client = SSHClient(ssh_config)
+        await integration_manager.register_component(
+            "ssh_client",
+            ssh_client,
+            ComponentType.CUSTOM
+        )
+    
+    # 添加FTP服务器
+    if getattr(config, "ftp_enabled", False):
+        ftp_config = FTPConfig(
+            host=getattr(config, "ftp_host", "localhost"),
+            port=getattr(config, "ftp_port", 21),
+            user=getattr(config, "ftp_user", ""),
+            password=getattr(config, "ftp_password", ""),
+            root_dir=getattr(config, "ftp_root_dir", "/tmp/ftp"),
+            passive_ports_start=getattr(config, "ftp_passive_ports_start", 60000),
+            passive_ports_end=getattr(config, "ftp_passive_ports_end", 65535)
+        )
+        ftp_server = EnhancedFTPServer(ftp_config)
+        await integration_manager.register_component(
+            "ftp_server",
+            ftp_server,
+            ComponentType.CUSTOM
+        )
+    
+    # 启动所有组件
+    await integration_manager.start()
+    
+    # 将核心组件保存到应用状态中
+    app.state.event_bus = event_bus
+    app.state.tcp_client = tcp_client
+    app.state.command_transmitter = command_transmitter
+    app.state.plugin_manager = plugin_manager
+    
+    # 监听系统重要事件
+    await event_bus.subscribe("system.error", log_system_error)
+    await event_bus.subscribe("system.startup.complete", on_system_ready)
+    
+    # 系统启动完成事件
+    await event_bus.publish(
+        "system.startup.complete", 
+        {"timestamp": time.time(), "status": "success"}
+    )
+    
+    logger.info("应用已成功启动")
+    
     yield
-    # 关闭插件系统
-    app.state.plugin_manager.stop_health_monitor()
-    app.state.plugin_manager.stop_plugin_watcher()
-    await app.state.plugin_manager.shutdown_plugins()
-    await app.forwarder.shutdown()
-    app.state.config_manager.stop_hot_reload()
+    
+    # 应用关闭
+    logger.info("应用关闭中...")
+    
+    # 发布系统关闭事件
+    await event_bus.publish(
+        "system.shutdown", 
+        {"timestamp": time.time()}
+    )
+    
+    # 停止所有组件
+    await integration_manager.stop()
+    
+    logger.info("应用已安全关闭")
+
+async def log_system_error(event):
+    """处理系统错误事件"""
+    logger.error(f"系统错误: {event.data}")
+
+async def on_system_ready(event):
+    """系统准备就绪处理器"""
+    logger.info("系统已准备就绪，所有组件已初始化")
 
 app = FastAPI(lifespan=lifespan)
 
@@ -620,51 +715,79 @@ app.include_router(config.router)
 
 @app.get("/health")
 async def health_check():
-    """Server health check"""
-    metrics = app.forwarder.performance_monitor.get_current_metrics()
-    return {
-        "status": "healthy",
-        "uptime": time.time() - app.state.start_time,
-        "metrics": metrics.__dict__
-    }
+    """系统健康检查"""
+    if hasattr(app.state, "integration_manager"):
+        im = app.state.integration_manager
+        components_health = {}
+        all_healthy = True
+        
+        for name, component in im._components.items():
+            if hasattr(component.component, "check_health"):
+                health = await component.component.check_health()
+                components_health[name] = health
+                if health.get("healthy", False) is False:
+                    all_healthy = False
+        
+        return {
+            "status": "healthy" if all_healthy else "degraded",
+            "timestamp": datetime.now().isoformat(),
+            "components": components_health
+        }
+    
+    return {"status": "unknown", "timestamp": datetime.now().isoformat()}
 
 
 @app.get("/metrics")
 async def get_metrics():
-    """获取性能指标"""
-    try:
-        metrics = app.forwarder.performance_monitor.get_current_metrics()
-        return JSONResponse(content=metrics.__dict__)
-    except Exception as e:
-        logger.error(f"Error getting metrics: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    """获取系统指标"""
+    if hasattr(app.state, "integration_manager"):
+        return app.state.integration_manager.get_metrics()
+    return {"error": "集成管理器未初始化"}
 
 
 @app.post("/ssh/execute")
-async def execute_ssh_command(
-    command: str = Body(...),
-    stream: bool = Query(False)
-):
-    """执行SSH命令"""
+async def ssh_execute(command: Dict[str, Any]):
+    """通过SSH执行命令"""
+    if not hasattr(app.state, "integration_manager"):
+        raise HTTPException(status_code=500, detail="系统未初始化")
+        
+    im = app.state.integration_manager
+    ssh_client = im.get_component("ssh_client")
+    
+    if not ssh_client:
+        raise HTTPException(status_code=503, detail="SSH客户端未启用")
+        
     try:
-        result = await app.forwarder.execute_ssh_command(command, stream)
-        return result
+        return await ssh_client.execute_command(command["cmd"])
     except Exception as e:
+        await im.route_event("system.error", {"source": "ssh", "error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/ssh/sync")
-async def sync_ssh_directory(
-    local_dir: str = Body(...),
-    remote_dir: str = Body(...),
-    delete: bool = Body(False)
-):
-    """同步目录到SSH服务器"""
+async def ssh_sync(sync_config: Dict[str, Any]):
+    """同步文件到远程SSH服务器"""
+    if not hasattr(app.state, "integration_manager"):
+        raise HTTPException(status_code=500, detail="系统未初始化")
+        
+    im = app.state.integration_manager
+    ssh_client = im.get_component("ssh_client")
+    
+    if not ssh_client:
+        raise HTTPException(status_code=503, detail="SSH客户端未启用")
+    
     try:
-        result = await app.forwarder.sync_ssh_directory(local_dir, remote_dir, delete)
-        return result
+        result = await ssh_client.sync_files(
+            sync_config["local_path"],
+            sync_config["remote_path"],
+            sync_config.get("include_patterns", []),
+            sync_config.get("exclude_patterns", [])
+        )
+        return {"status": "success", "files_synced": result}
     except Exception as e:
+        await im.route_event("system.error", {"source": "ssh_sync", "error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
+
 
 # 添加FTP相关路由
 

@@ -17,6 +17,30 @@ from logger_config import setup_logging
 from app.routers import router
 from app.core.middleware import ErrorHandlerMiddleware, PerformanceMiddleware, SecurityMiddleware
 
+import asyncio
+import sys
+import logging
+from typing import Dict, Any, List, Optional
+import argparse
+import signal
+from pathlib import Path
+
+# 确保可以导入app包
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from app.server import app, lifespan
+from app.core.shared_services import SharedServices, ServiceType
+from app.core.integration_manager import IntegrationManager, ComponentType
+from app.core.event_bus import EventBus, EventPriority
+from app.core.message_bus import MessageBus
+from app.core.command_dispatcher import CommandDispatcher, CommandTransmitter
+from app.plugin.plugin_manager import PluginManager
+from app.utils.logger import setup_logging
+from app.config.config_manager import ConfigManager
+
+# 初始化日志
+logger = setup_logging()
+
 # 创建命令行应用
 cli = typer.Typer()
 
@@ -253,6 +277,169 @@ def init_config(output: str = typer.Option("config.yaml", "--output", "-o")):
     with open(output, 'w') as f:
         yaml.dump(default_config, f, default_flow_style=False)
     print(f"Default configuration has been written to {output}")
+
+
+class ApplicationContext:
+    """应用上下文，管理所有核心组件"""
+    
+    def __init__(self, config_path: str = "config.yaml"):
+        self.config_path = config_path
+        self.integration_manager: Optional[IntegrationManager] = None
+        self.shared_services: Optional[SharedServices] = None
+        self.event_bus: Optional[EventBus] = None
+        self.message_bus: Optional[MessageBus] = None
+        self.command_dispatcher: Optional[CommandDispatcher] = None
+        self.plugin_manager: Optional[PluginManager] = None
+        self.config_manager: Optional[ConfigManager] = None
+        self.running = False
+        self._shutdown_event = asyncio.Event()
+
+    async def initialize(self):
+        """初始化应用上下文和所有核心组件"""
+        logger.info("初始化应用上下文...")
+        
+        # 创建共享服务管理器
+        self.shared_services = SharedServices()
+        
+        # 创建集成管理器
+        self.integration_manager = IntegrationManager(config_path=self.config_path)
+        
+        # 创建并注册事件总线
+        self.event_bus = EventBus()
+        await self.integration_manager.register_component(
+            "event_bus", 
+            self.event_bus, 
+            ComponentType.EVENT_BUS
+        )
+        
+        # 创建并注册命令分发器
+        self.command_dispatcher = CommandDispatcher()
+        await self.integration_manager.register_component(
+            "command_dispatcher", 
+            self.command_dispatcher, 
+            ComponentType.CUSTOM
+        )
+        
+        # 创建并注册插件管理器
+        self.plugin_manager = PluginManager()
+        await self.integration_manager.register_component(
+            "plugin_manager", 
+            self.plugin_manager, 
+            ComponentType.CUSTOM
+        )
+        
+        # 创建并注册配置管理器
+        self.config_manager = ConfigManager(self.config_path)
+        await self.integration_manager.register_component(
+            "config_manager", 
+            self.config_manager, 
+            ComponentType.CONFIG_MANAGER
+        )
+        
+        # 注册组件到共享服务
+        await self.shared_services.register_service(
+            ServiceType.EVENT_BUS, "default", self.event_bus, make_default=True)
+        await self.shared_services.register_service(
+            ServiceType.COMMAND_DISPATCHER, "default", self.command_dispatcher, make_default=True)
+        await self.shared_services.register_service(
+            ServiceType.PLUGIN_MANAGER, "default", self.plugin_manager, make_default=True)
+        
+        # 组件之间的相互集成
+        await self.event_bus.register_plugin_handlers(self.plugin_manager)
+        await self.plugin_manager.set_event_bus(self.event_bus)
+        await self.plugin_manager.set_command_dispatcher(self.command_dispatcher)
+        await self.command_dispatcher.set_event_bus(self.event_bus)
+        
+        # 完成初始化
+        await self.integration_manager.start()
+        self.running = True
+        logger.info("应用上下文初始化完成")
+
+    async def shutdown(self):
+        """优雅关闭所有组件"""
+        if not self.running:
+            return
+            
+        logger.info("关闭应用上下文...")
+        self.running = False
+        
+        # 发布系统关闭事件
+        if self.event_bus:
+            await self.event_bus.publish(
+                "system.shutdown", 
+                {"timestamp": asyncio.get_event_loop().time()}
+            )
+        
+        # 关闭插件管理器
+        if self.plugin_manager:
+            await self.plugin_manager.shutdown_plugins()
+        
+        # 停止所有组件
+        if self.integration_manager:
+            await self.integration_manager.stop()
+        
+        # 设置关闭事件，通知等待的任务
+        self._shutdown_event.set()
+        logger.info("应用上下文已关闭")
+    
+    async def wait_for_shutdown(self):
+        """等待应用关闭"""
+        await self._shutdown_event.wait()
+
+
+# 全局应用上下文
+app_context = None
+
+
+async def start_application(config_path: str = "config.yaml"):
+    """启动应用"""
+    global app_context
+    app_context = ApplicationContext(config_path)
+    await app_context.initialize()
+    
+    # 注册信号处理器用于优雅关闭
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop = asyncio.get_event_loop()
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown_application()))
+    
+    # 将应用上下文绑定到FastAPI应用
+    app.state.context = app_context
+
+
+async def shutdown_application():
+    """关闭应用"""
+    global app_context
+    if app_context:
+        await app_context.shutdown()
+
+
+def run_server(host: str = "0.0.0.0", port: int = 8000, 
+               config_path: str = "config.yaml", reload: bool = False):
+    """运行服务器"""
+    # 确保配置文件存在
+    if not os.path.isfile(config_path):
+        logger.warning(f"配置文件 {config_path} 不存在，将使用默认配置")
+    
+    # 启动FastAPI应用
+    logger.info(f"启动服务器: {host}:{port}")
+    uvicorn.run(
+        "app.server:app",
+        host=host,
+        port=port,
+        reload=reload,
+        log_level="info"
+    )
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Cobalt Forward 服务器")
+    parser.add_argument("--host", default="0.0.0.0", help="监听主机地址")
+    parser.add_argument("--port", type=int, default=8000, help="监听端口")
+    parser.add_argument("--config", default="config.yaml", help="配置文件路径")
+    parser.add_argument("--reload", action="store_true", help="启用热重载")
+    
+    args = parser.parse_args()
+    run_server(args.host, args.port, args.config, args.reload)
 
 
 if __name__ == "__main__":

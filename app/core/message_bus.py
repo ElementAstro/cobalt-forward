@@ -190,6 +190,10 @@ class MessageBus:
         self._message_pool = asyncio.Queue(maxsize=10000)
         self._worker_count = 4
         self._workers = []
+        # 添加与事件总线的集成点
+        self._event_bus = None
+        self._plugin_manager = None
+        self._integration_manager = None
 
     async def set_command_dispatcher(self, dispatcher):
         """设置命令分发器"""
@@ -217,6 +221,21 @@ class MessageBus:
         """注册消息转换器"""
         self._transformers.append(transformer)
         logger.info(f"消息转换器 {transformer.__class__.__name__} 已注册")
+
+    async def set_event_bus(self, event_bus):
+        """设置事件总线引用"""
+        self._event_bus = event_bus
+        logger.info("事件总线已集成到消息总线")
+
+    async def set_plugin_manager(self, plugin_manager):
+        """设置插件管理器引用"""
+        self._plugin_manager = plugin_manager
+        logger.info("插件管理器已集成到消息总线")
+        
+    async def set_integration_manager(self, integration_manager):
+        """设置集成管理器引用"""
+        self._integration_manager = integration_manager
+        logger.info("集成管理器已集成到消息总线")
 
     def _setup_error_handlers(self):
         """设置错误处理器"""
@@ -281,6 +300,27 @@ class MessageBus:
         # 应用消息转换器
         for transformer in self._transformers:
             data = await transformer.transform(data)
+
+        # 转发到插件系统
+        if self._plugin_manager:
+            try:
+                # 检查是否有插件注册了对此主题的处理
+                plugin_handled = await self._plugin_manager.handle_topic(topic, data)
+                if plugin_handled:
+                    # 如果插件处理了消息，记录但继续处理
+                    logger.debug(f"消息主题 {topic} 由插件系统处理")
+            except Exception as e:
+                logger.error(f"插件处理消息失败: {e}")
+        
+        # 转发到事件总线系统
+        if self._event_bus and topic.startswith("event."):
+            try:
+                # 从event.xxx格式转换为xxx事件名
+                event_name = topic[6:]
+                await self._event_bus.publish(event_name, data)
+                logger.debug(f"消息主题 {topic} 转发到事件总线: {event_name}")
+            except Exception as e:
+                logger.error(f"转发到事件总线失败: {e}")
 
         # 按主题前缀路由到对应组件
         prefix = topic.split('.')[0]
@@ -394,6 +434,11 @@ class MessageBus:
                     queue.put(message) for queue in self._subscribers[message.topic]
                 ])
 
+            # 如果是事件消息，转发到事件总线
+            if message.topic.startswith("event.") and self._event_bus:
+                event_name = message.topic[6:]
+                await self._event_bus.publish(event_name, message.data)
+
             # 更新指标
             processing_time = asyncio.get_event_loop().time() - start_time
             self._update_metrics(processing_time)
@@ -426,12 +471,20 @@ class MessageBus:
     @property
     def metrics(self) -> Dict[str, Any]:
         """Get message bus metrics"""
-        return {
+        metrics = {
             'message_count': self._message_count,
             'average_processing_time': sum(self._processing_times) / len(self._processing_times) if self._processing_times else 0,
             'active_subscribers': sum(len(subs) for subs in self._subscribers.values()),
-            'pending_responses': len(self._response_futures)
+            'pending_responses': len(self._response_futures),
+            'transformers_count': len(self._transformers),
+            'components_count': len(self._components)
         }
+        
+        # 添加组件统计
+        if self._components:
+            metrics['components'] = list(self._components.keys())
+            
+        return metrics
 
 # Extended TCP Client with message bus support
 

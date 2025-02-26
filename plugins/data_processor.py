@@ -1,4 +1,4 @@
-from app.plugin_system import Plugin, PluginMetadata
+from app.plugin.plugin_system import Plugin, PluginMetadata
 from typing import Dict, Any
 from loguru import logger
 
@@ -10,6 +10,7 @@ PLUGIN_METADATA = PluginMetadata(
     dependencies=[],
     load_priority=50
 )
+
 
 class DataProcessor(Plugin):
     async def initialize(self):
