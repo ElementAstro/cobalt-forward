@@ -1,837 +1,946 @@
+"""
+Plugin manager for loading, unloading and managing plugins.
+
+This module provides the primary interface for the plugin system,
+including plugin discovery, lifecycle management, dependency injection,
+and versioning.
+"""
 import os
 import sys
-import time
-import asyncio
 import importlib
-import importlib.util
 import inspect
 import logging
-import threading
+import asyncio
+import time
 import traceback
-import yaml
-import hashlib
 import json
-from typing import Dict, List, Set, Any, Optional, Type, Callable, Tuple, Union
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from typing import Dict, List, Any, Optional, Set, Tuple, Callable, Union, Type
 from pathlib import Path
-import pkg_resources
-import signal
-
-from app.core.event_bus import EventPriority
+import concurrent.futures
+import threading
 
 from .base import Plugin
-from .models import PluginMetadata, PluginState, PluginMetrics
-from .utils import get_file_hash, load_yaml_config, safe_import_module
-from .permissions import PluginPermission
+from .models import PluginMetadata, PluginState
+from .permissions import PermissionManager
+from .function import FunctionRegistry
+from .event import EventBus
+from .sandbox import PluginSandbox
 
 logger = logging.getLogger(__name__)
 
 
-class PluginManager:
-    """插件管理器，负责加载、初始化和管理插件"""
+class PluginLoadError(Exception):
+    """Exception raised when a plugin fails to load"""
+    pass
 
+
+class PluginDependencyError(Exception):
+    """Exception raised when plugin dependencies cannot be satisfied"""
+    pass
+
+
+class PluginVersionError(Exception):
+    """Exception raised when plugin versions are incompatible"""
+    pass
+
+
+class PluginManager:
+    """
+    Plugin manager responsible for loading, unloading, and managing plugins
+    """
+    
     def __init__(self, 
                  plugin_dir: str = "plugins", 
                  config_dir: str = "config/plugins",
-                 cache_dir: str = "cache/plugins"):
-        """初始化插件管理器"""
-        # 插件目录
-        self.plugin_dir = plugin_dir
-        self.config_dir = config_dir
-        self.cache_dir = cache_dir
+                 event_bus: Optional[EventBus] = None,
+                 function_registry: Optional[FunctionRegistry] = None,
+                 permission_manager: Optional[PermissionManager] = None):
+        """
+        Initialize plugin manager
         
-        # 插件容器
+        Args:
+            plugin_dir: Directory containing plugins
+            config_dir: Directory containing plugin configurations
+            event_bus: Event bus instance for plugin events
+            function_registry: Function registry for plugin functions
+            permission_manager: Permission manager for plugin permissions
+        """
+        self.plugin_dir = os.path.abspath(plugin_dir)
+        self.config_dir = os.path.abspath(config_dir)
+        
+        # Plugin registry
         self.plugins: Dict[str, Plugin] = {}
+        self.plugin_metadata: Dict[str, PluginMetadata] = {}
+        self.plugin_paths: Dict[str, str] = {}
         self.plugin_modules: Dict[str, Any] = {}
-        self.plugin_states: Dict[str, str] = {}
         self.plugin_configs: Dict[str, Dict[str, Any]] = {}
-        self.disabled_plugins: Set[str] = set()
+        self.plugin_load_order: List[str] = []
         
-        # 钩子和事件系统
-        self.hooks: Dict[str, List[Callable]] = {}
-        self.event_handlers: Dict[str, List[Tuple[str, Callable]]] = {}
+        # Plugin dependencies
+        self.plugin_dependencies: Dict[str, Set[str]] = {}
+        self.plugin_dependents: Dict[str, Set[str]] = {}
         
-        # 依赖管理
-        self._load_order: List[str] = []
-        self._dependency_graph: Dict[str, List[str]] = {}
-        self._dependency_count: Dict[str, int] = {}
-        self._reverse_deps: Dict[str, Set[str]] = {}
+        # Component references
+        self.event_bus = event_bus
+        self.function_registry = function_registry
+        self.permission_manager = permission_manager or PermissionManager()
         
-        # 文件监控
-        self._watch_task: Optional[asyncio.Task] = None
-        self._file_hashes: Dict[str, str] = {}
-        self._config_mtimes: Dict[str, float] = {}
-        
-        # 健康监控
-        self._health_check_task: Optional[asyncio.Task] = None
-        self.plugin_health: Dict[str, Dict[str, Any]] = {}
-        
-        # 插件性能指标
-        self.plugin_stats: Dict[str, Dict[str, Any]] = {}
-        
-        # 权限管理
-        self.plugin_permissions: Dict[str, Set[str]] = {}
-        self._permission_log: List[Dict[str, Any]] = []
-        
-        # 消息系统
-        self._message_queues: Dict[str, asyncio.Queue] = {}
-        
-        # 版本和兼容性
-        self._version_requirements: Dict[str, str] = {}
-        self._system_info = self._get_system_info()
-        
-        # 多线程资源
-        self._thread_pool = ThreadPoolExecutor(
-            max_workers=min(32, (os.cpu_count() or 1) + 4),
-            thread_name_prefix="plugin_worker"
-        )
+        # Lock for thread safety
         self._lock = asyncio.Lock()
         
-        # 缓存
-        self._plugin_cache: Dict[str, Dict[str, Any]] = {}
-        self._function_cache: Dict[str, Dict[str, Any]] = {}
-        self._reload_count: Dict[str, int] = {}
+        # Thread pool for background tasks
+        self.thread_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=4, 
+            thread_name_prefix="plugin-manager"
+        )
         
-        # 错误追踪
-        self._error_log: List[Dict[str, Any]] = []
-        self._max_errors = 1000
+        # Shared resources for plugins
+        self.shared_resources: Dict[str, Any] = {}
         
-        # 确保目录存在
-        os.makedirs(plugin_dir, exist_ok=True)
-        os.makedirs(config_dir, exist_ok=True)
-        os.makedirs(cache_dir, exist_ok=True)
-        
-        # 初始化标志
-        self.initialized = False
-        self.shutting_down = False
-        
-        # 注册信号处理器
-        self._setup_signal_handlers()
-        
-        # 添加核心系统集成点
-        self._event_bus = None
-        self._message_bus = None
-        self._command_dispatcher = None
-        self._integration_manager = None
+        # Plugin sandbox
+        self.sandbox = PluginSandbox()
 
-    def _setup_signal_handlers(self):
-        """设置信号处理器，用于优雅关闭"""
-        def signal_handler(sig, frame):
-            logger.info(f"接收到信号 {sig}，准备关闭插件系统")
-            if not self.shutting_down:
-                self.shutting_down = True
-                asyncio.create_task(self.shutdown_plugins())
+    async def start(self) -> None:
+        """Start the plugin manager and initialize built-in plugins"""
+        logger.info("Starting plugin manager")
+        await self.discover_plugins()
+        await self.load_plugin_configs()
+        await self.load_enabled_plugins()
         
-        try:
-            signal.signal(signal.SIGINT, signal_handler)
-            signal.signal(signal.SIGTERM, signal_handler)
-        except (ValueError, AttributeError):
-            # 某些环境如Windows中可能不支持特定信号
-            logger.warning("无法设置信号处理器")
-
-    def _get_system_info(self) -> Dict[str, Any]:
-        """获取系统信息"""
-        import platform
-        
-        return {
-            "os": platform.system(),
-            "python_version": platform.python_version(),
-            "platform": platform.platform(),
-            "cpu_count": os.cpu_count(),
-            "time": datetime.now().isoformat()
-        }
-
-    async def set_event_bus(self, event_bus):
-        """设置事件总线引用"""
-        self._event_bus = event_bus
-        logger.info("事件总线已与插件管理器集成")
-
-    async def set_message_bus(self, message_bus):
-        """设置消息总线引用"""
-        self._message_bus = message_bus
-        logger.info("消息总线已与插件管理器集成")
-        
-    async def set_command_dispatcher(self, command_dispatcher):
-        """设置命令分发器引用"""
-        self._command_dispatcher = command_dispatcher
-        logger.info("命令分发器已与插件管理器集成")
-        
-    async def set_integration_manager(self, integration_manager):
-        """设置集成管理器引用"""
-        self._integration_manager = integration_manager
-        logger.info("集成管理器已与插件管理器集成")
-
-    async def initialize(self):
-        """初始化插件管理器"""
-        if self.initialized:
-            return
+        if self.event_bus:
+            await self.event_bus.emit("plugin_manager.started", {
+                "plugin_count": len(self.plugins),
+                "enabled_plugins": [p for p in self.plugins if self.plugins[p].state == PluginState.ACTIVE]
+            })
             
-        logger.info("正在初始化插件管理器...")
+        logger.info(f"Plugin manager started with {len(self.plugins)} plugins")
+    
+    async def stop(self) -> None:
+        """Stop the plugin manager and unload all plugins"""
+        logger.info("Stopping plugin manager")
         
-        # 发布插件系统启动事件
-        if self._event_bus:
-            await self._event_bus.publish(
-                "plugin.system.startup", 
-                {
-                    "timestamp": time.time(),
-                    "plugin_dir": self.plugin_dir,
-                    "config_dir": self.config_dir
-                }
-            )
-        
-        # 扫描插件目录
-        await self._scan_plugins()
-        
-        # 解析依赖关系和加载顺序
-        self._resolve_dependencies()
-        
-        # 加载插件
-        await self.load_plugins()
-        
-        # 启动文件监控和健康检查
-        await self.start_plugin_watcher()
-        await self.start_health_monitor()
-        
-        self.initialized = True
-        logger.info(f"插件管理器初始化完成，已加载 {len(self.plugins)} 个插件")
-        
-        # 发布插件系统就绪事件
-        if self._event_bus:
-            await self._event_bus.publish(
-                "plugin.system.ready", 
-                {
-                    "timestamp": time.time(),
-                    "loaded_plugins": list(self.plugins.keys())
-                }
-            )
-
-    async def _scan_plugins(self):
-        """扫描插件目录，收集所有可用的插件"""
-        plugin_files = []
-        
-        # 获取插件目录中的所有Python文件
-        for root, dirs, files in os.walk(self.plugin_dir):
-            for file in files:
-                if file.endswith('.py') and not file.startswith('__'):
-                    rel_path = os.path.relpath(os.path.join(root, file), self.plugin_dir)
-                    module_path = os.path.splitext(rel_path)[0].replace(os.sep, '.')
-                    plugin_files.append((module_path, os.path.join(root, file)))
-        
-        # 并行收集插件元数据
-        tasks = []
-        for module_path, file_path in plugin_files:
-            tasks.append(self._collect_plugin_metadata(module_path, file_path))
-        
-        await asyncio.gather(*tasks)
-        logger.info(f"扫描到 {len(self._dependency_graph)} 个插件")
-
-    async def _collect_plugin_metadata(self, module_name: str, file_path: str):
-        """收集插件元数据"""
-        try:
-            # 记录文件哈希值
-            self._file_hashes[module_name] = get_file_hash(file_path)
+        # Unload plugins in reverse load order
+        plugins_to_unload = list(reversed(self.plugin_load_order))
+        for plugin_name in plugins_to_unload:
+            await self.unload_plugin(plugin_name)
             
-            # 尝试导入模块
-            module = await self.run_in_thread(safe_import_module, module_name, file_path)
-            self.plugin_modules[module_name] = module
-            
-            # 提取元数据
-            metadata = None
-            
-            # 方法1：查找PLUGIN_METADATA属性
-            if hasattr(module, 'PLUGIN_METADATA'):
-                metadata = module.PLUGIN_METADATA
-            else:
-                # 方法2：查找插件类并从类中获取元数据
-                plugin_classes = [
-                    obj for name, obj in inspect.getmembers(module)
-                    if inspect.isclass(obj) and issubclass(obj, Plugin) and obj != Plugin
-                ]
-                
-                if plugin_classes and hasattr(plugin_classes[0], 'metadata'):
-                    # 创建类的实例来获取元数据
-                    metadata = plugin_classes[0].metadata
-            
-            if metadata:
-                # 存储依赖信息
-                self._dependency_graph[module_name] = getattr(metadata, 'dependencies', []) or []
-                
-                # 记录版本要求
-                if hasattr(metadata, 'required_version'):
-                    self._version_requirements[module_name] = metadata.required_version
-                
-                # 记录初始状态
-                self.plugin_states[module_name] = PluginState.UNLOADED
-                
-                logger.info(f"收集到插件元数据: {module_name}")
-            else:
-                logger.warning(f"未找到插件元数据: {module_name}")
-                
-        except Exception as e:
-            logger.error(f"收集插件 {module_name} 元数据失败: {e}")
-            self._log_error(module_name, f"元数据收集失败: {str(e)}")
-
-    def _resolve_dependencies(self):
-        """解析插件依赖关系，确定加载顺序"""
-        # 初始化依赖计数和反向依赖
-        for plugin in self._dependency_graph:
-            self._dependency_count[plugin] = len(self._dependency_graph[plugin])
-            for dep in self._dependency_graph[plugin]:
-                if dep not in self._reverse_deps:
-                    self._reverse_deps[dep] = set()
-                self._reverse_deps[dep].add(plugin)
+        # Shutdown thread pool
+        self.thread_pool.shutdown(wait=False)
         
-        # 使用拓扑排序确定加载顺序
-        load_order = []
-        no_deps = [p for p in self._dependency_graph if self._dependency_count[p] == 0]
-        
-        while no_deps:
-            plugin = no_deps.pop(0)
-            load_order.append(plugin)
+        if self.event_bus:
+            await self.event_bus.emit("plugin_manager.stopped", {})
             
-            # 更新依赖此插件的插件
-            for dependent in self._reverse_deps.get(plugin, set()):
-                self._dependency_count[dependent] -= 1
-                if self._dependency_count[dependent] == 0:
-                    no_deps.append(dependent)
+        logger.info("Plugin manager stopped")
+    
+    async def discover_plugins(self) -> Dict[str, PluginMetadata]:
+        """
+        Discover available plugins and their metadata
         
-        # 检查是否有循环依赖
-        if len(load_order) < len(self._dependency_graph):
-            # 找出循环依赖的插件
-            cyclic_plugins = [p for p in self._dependency_graph if self._dependency_count[p] > 0]
-            logger.error(f"检测到循环依赖: {cyclic_plugins}")
-            
-            # 将剩余插件按名称排序添加到加载顺序
-            remaining = sorted([p for p in self._dependency_graph if p not in load_order])
-            load_order.extend(remaining)
-        
-        self._load_order = load_order
-        logger.info(f"插件加载顺序: {load_order}")
-
-    async def load_plugins(self):
-        """加载所有插件"""
-        logger.info("开始加载插件...")
-        
+        Returns:
+            Dictionary mapping plugin names to metadata
+        """
+        logger.info(f"Discovering plugins in {self.plugin_dir}")
         async with self._lock:
-            # 按加载顺序加载插件
-            for plugin_name in self._load_order:
+            discovered_plugins = {}
+            plugin_files = []
+            
+            # Ensure plugin directory exists
+            os.makedirs(self.plugin_dir, exist_ok=True)
+            
+            # Find potential plugin files
+            for root, dirs, files in os.walk(self.plugin_dir):
+                for file in files:
+                    if file == "__init__.py" or file.endswith(".py"):
+                        plugin_files.append(os.path.join(root, file))
+            
+            # Import each potential plugin
+            for plugin_file in plugin_files:
                 try:
-                    # 跳过禁用的插件
-                    if plugin_name in self.disabled_plugins:
-                        logger.info(f"跳过禁用的插件: {plugin_name}")
-                        continue
+                    # Convert file path to module path
+                    rel_path = os.path.relpath(plugin_file, start=os.path.dirname(self.plugin_dir))
+                    module_path = rel_path.replace(os.path.sep, ".").replace(".py", "")
                     
-                    # 检查依赖是否都已加载
-                    deps = self._dependency_graph.get(plugin_name, [])
-                    missing_deps = [dep for dep in deps if dep not in self.plugins]
-                    if missing_deps:
-                        logger.error(f"插件 {plugin_name} 缺少依赖: {missing_deps}")
-                        self._log_error(plugin_name, f"缺少依赖: {missing_deps}")
+                    # Skip __pycache__ and similar directories
+                    if "__pycache__" in module_path:
                         continue
+                        
+                    # Import module
+                    module = importlib.import_module(module_path)
                     
-                    # 加载插件
-                    await self._load_plugin(plugin_name)
+                    # Look for plugin class
+                    for attr_name in dir(module):
+                        attr = getattr(module, attr_name)
+                        
+                        # Check if it's a plugin class (but not Plugin itself)
+                        if (inspect.isclass(attr) and 
+                            issubclass(attr, Plugin) and 
+                            attr is not Plugin and 
+                            hasattr(attr, 'initialize')):
+                            
+                            # Create instance to get metadata
+                            plugin_instance = attr()
+                            
+                            if hasattr(plugin_instance, 'metadata') and plugin_instance.metadata:
+                                metadata = plugin_instance.metadata
+                                plugin_name = metadata.name
+                                
+                                # Store plugin info
+                                discovered_plugins[plugin_name] = metadata
+                                self.plugin_metadata[plugin_name] = metadata
+                                self.plugin_paths[plugin_name] = plugin_file
+                                self.plugin_modules[plugin_name] = module
+                                
+                                # Store dependencies
+                                self.plugin_dependencies[plugin_name] = set(metadata.dependencies or [])
+                                
+                                logger.info(f"Discovered plugin: {plugin_name} v{metadata.version}")
+                
+                except Exception as e:
+                    logger.error(f"Error discovering plugin in {plugin_file}: {e}")
+                    logger.debug(f"Plugin discovery error details: {traceback.format_exc()}")
+            
+            # Build reverse dependency map
+            for plugin_name, deps in self.plugin_dependencies.items():
+                for dep_name in deps:
+                    if dep_name not in self.plugin_dependents:
+                        self.plugin_dependents[dep_name] = set()
+                    self.plugin_dependents[dep_name].add(plugin_name)
+            
+            return discovered_plugins
+    
+    async def load_plugin_configs(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Load configurations for all discovered plugins
+        
+        Returns:
+            Dictionary of plugin configurations
+        """
+        logger.info("Loading plugin configurations")
+        async with self._lock:
+            # Ensure config directory exists
+            os.makedirs(self.config_dir, exist_ok=True)
+            
+            # Load each plugin's config
+            for plugin_name, metadata in self.plugin_metadata.items():
+                try:
+                    config_file = os.path.join(self.config_dir, f"{plugin_name}.json")
+                    
+                    # Create default config if it doesn't exist
+                    if not os.path.exists(config_file):
+                        default_config = metadata.config_schema.get("default", {}) if hasattr(metadata, "config_schema") else {}
+                        os.makedirs(os.path.dirname(config_file), exist_ok=True)
+                        with open(config_file, 'w') as f:
+                            json.dump(default_config, f, indent=2)
+                            
+                    # Load config
+                    with open(config_file, 'r') as f:
+                        config = json.load(f)
+                        
+                    self.plugin_configs[plugin_name] = config
+                    logger.debug(f"Loaded configuration for plugin {plugin_name}")
                     
                 except Exception as e:
-                    logger.error(f"加载插件 {plugin_name} 失败: {e}\n{traceback.format_exc()}")
-                    self._log_error(plugin_name, f"加载失败: {str(e)}")
-                    self.plugin_states[plugin_name] = PluginState.ERROR
-        
-        logger.info(f"插件加载完成，成功加载 {len(self.plugins)} 个插件")
-
-    async def _load_plugin(self, plugin_name: str):
-        """加载单个插件"""
-        try:
-            logger.debug(f"正在加载插件: {plugin_name}")
+                    logger.error(f"Error loading configuration for plugin {plugin_name}: {e}")
+                    # Use empty config as fallback
+                    self.plugin_configs[plugin_name] = {}
             
-            # 更新状态
-            self.plugin_states[plugin_name] = PluginState.LOADING
-            
-            # 获取模块
-            module = self.plugin_modules.get(plugin_name)
-            if not module:
-                raise ValueError(f"插件模块 {plugin_name} 未找到")
-            
-            # 查找插件类
-            plugin_classes = [
-                obj for name, obj in inspect.getmembers(module)
-                if inspect.isclass(obj) and issubclass(obj, Plugin) and obj != Plugin
-            ]
-            
-            if not plugin_classes:
-                raise ValueError(f"在 {plugin_name} 中未找到插件类")
-            
-            # 创建插件实例
-            plugin_class = plugin_classes[0]
-            plugin = plugin_class()
-            
-            # 加载配置
-            config = await self._load_plugin_config(plugin_name)
-            if config:
-                plugin.config = config
-            
-            # 设置基本权限
-            self.plugin_permissions[plugin_name] = {PluginPermission.FILE_IO}
-            plugin._permissions = self.plugin_permissions[plugin_name]
-            
-            # 设置插件管理器引用
-            plugin._plugin_manager = self
-            
-            # 设置核心系统引用
-            plugin._event_bus = self._event_bus
-            plugin._message_bus = self._message_bus
-            plugin._command_dispatcher = self._command_dispatcher
-            
-            # 初始化插件
-            await plugin.safe_initialize()
-            
-            # 检查初始化状态
-            if plugin.state == PluginState.ERROR:
-                raise RuntimeError(f"插件初始化失败: {plugin._last_error}")
-            
-            # 注册插件
-            self.plugins[plugin_name] = plugin
-            self.plugin_states[plugin_name] = PluginState.ACTIVE
-            
-            # 创建消息队列
-            self._message_queues[plugin_name] = plugin._message_queue
-            
-            # 记录统计信息
-            self.plugin_stats[plugin_name] = {
-                "load_time": time.time(),
-                "initialize_time": time.time() - (plugin.start_time or time.time()),
-                "error_count": 0,
-                "config_version": 1
-            }
-            
-            # 发布插件加载事件
-            if self._event_bus:
-                await self._event_bus.publish(
-                    "plugin.loaded", 
-                    {
-                        "name": plugin_name,
-                        "timestamp": time.time(),
-                        "metadata": plugin.metadata.__dict__ if plugin.metadata else {}
-                    }
-                )
-            
-            logger.info(f"成功加载插件: {plugin_name}")
-            return plugin
-            
-        except Exception as e:
-            logger.error(f"加载插件 {plugin_name} 失败: {e}\n{traceback.format_exc()}")
-            self._log_error(plugin_name, f"加载失败: {str(e)}")
-            self.plugin_states[plugin_name] = PluginState.ERROR
-            
-            # 发布插件错误事件
-            if self._event_bus:
-                await self._event_bus.publish(
-                    "plugin.error", 
-                    {
-                        "name": plugin_name,
-                        "timestamp": time.time(),
-                        "error": str(e),
-                        "traceback": traceback.format_exc()
-                    },
-                    EventPriority.HIGH
-                )
-            
-            return None
+            return self.plugin_configs
     
-    async def _load_plugin_config(self, plugin_name: str) -> Dict[str, Any]:
-        """加载插件配置"""
-        config_file = os.path.join(self.config_dir, f"{plugin_name}.yaml")
-        try:
-            if os.path.exists(config_file):
-                config = load_yaml_config(config_file)
-                self._config_mtimes[plugin_name] = os.path.getmtime(config_file)
-                self.plugin_configs[plugin_name] = config
-                return config
-        except Exception as e:
-            logger.error(f"加载插件 {plugin_name} 配置失败: {e}")
-            self._log_error(plugin_name, f"配置加载失败: {str(e)}")
+    async def load_enabled_plugins(self) -> List[str]:
+        """
+        Load all enabled plugins respecting dependencies
         
-        # 返回空配置
-        return {}
+        Returns:
+            List of successfully loaded plugins
+        """
+        logger.info("Loading enabled plugins")
+        loaded_plugins = []
+        
+        # Get list of enabled plugins
+        enabled_plugins = await self._get_enabled_plugins()
+        
+        # Sort plugins by dependencies and priority
+        load_order = await self._calculate_load_order(enabled_plugins)
+        
+        # Load plugins in order
+        for plugin_name in load_order:
+            try:
+                success = await self.load_plugin(plugin_name)
+                if success:
+                    loaded_plugins.append(plugin_name)
+            except Exception as e:
+                logger.error(f"Failed to load plugin {plugin_name}: {e}")
+                logger.debug(f"Plugin load error details: {traceback.format_exc()}")
+                
+        self.plugin_load_order = loaded_plugins
+        return loaded_plugins
     
-    async def _save_plugin_config(self, plugin_name: str, config: Dict[str, Any]) -> bool:
-        """保存插件配置"""
-        config_file = os.path.join(self.config_dir, f"{plugin_name}.yaml")
-        try:
-            with open(config_file, 'w', encoding='utf-8') as f:
-                yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
-            self._config_mtimes[plugin_name] = os.path.getmtime(config_file)
-            self.plugin_configs[plugin_name] = config
+    async def _get_enabled_plugins(self) -> List[str]:
+        """
+        Get list of plugins that should be enabled
+        
+        Returns:
+            List of enabled plugin names
+        """
+        # For now, all discovered plugins are considered enabled
+        # This could be enhanced with a config option
+        return list(self.plugin_metadata.keys())
+    
+    async def _calculate_load_order(self, plugin_names: List[str]) -> List[str]:
+        """
+        Calculate plugin load order based on dependencies and priorities
+        
+        Args:
+            plugin_names: List of plugin names to load
+            
+        Returns:
+            Sorted list of plugin names in load order
+            
+        Raises:
+            PluginDependencyError: If circular dependencies are detected
+        """
+        # Dependency resolution using topological sort
+        result = []
+        temp_marks = set()
+        perm_marks = set()
+        
+        async def visit(plugin):
+            """Recursive visiting function for topological sort"""
+            if plugin in perm_marks:
+                return
+            if plugin in temp_marks:
+                raise PluginDependencyError(f"Circular dependency detected involving {plugin}")
+                
+            temp_marks.add(plugin)
+            
+            # Visit dependencies
+            if plugin in self.plugin_dependencies:
+                for dep in self.plugin_dependencies[plugin]:
+                    # Skip if dependency is not in the provided list
+                    if dep not in plugin_names:
+                        logger.warning(f"Plugin {plugin} depends on {dep}, but it's not enabled")
+                        continue
+                    await visit(dep)
+                    
+            temp_marks.remove(plugin)
+            perm_marks.add(plugin)
+            result.append(plugin)
+            
+        # Visit all plugins
+        for plugin in plugin_names:
+            if plugin not in perm_marks:
+                await visit(plugin)
+                
+        # Sort by priority within dependency constraints
+        # Higher priority (lower number) loads first
+        def get_priority(plugin_name):
+            metadata = self.plugin_metadata.get(plugin_name)
+            return metadata.load_priority if metadata else 100
+            
+        # Group plugins by their depth in the dependency graph
+        layers = []
+        current_layer = [p for p in result if not any(
+            d in result for d in self.plugin_dependencies.get(p, set())
+        )]
+        
+        while current_layer:
+            # Sort current layer by priority
+            current_layer.sort(key=get_priority)
+            layers.append(current_layer)
+            
+            # Remove current layer from result
+            for p in current_layer:
+                result.remove(p)
+                
+            # Find next layer
+            current_layer = [p for p in result if not any(
+                d in result for d in self.plugin_dependencies.get(p, set())
+            )]
+            
+        # Flatten layers back into a single list
+        return [p for layer in layers for p in layer]
+    
+    async def load_plugin(self, plugin_name: str) -> bool:
+        """
+        Load and initialize a specific plugin
+        
+        Args:
+            plugin_name: Name of the plugin to load
+            
+        Returns:
+            True if plugin was loaded successfully, False otherwise
+            
+        Raises:
+            ValueError: If plugin is not found
+            PluginLoadError: If plugin fails to load
+        """
+        if plugin_name not in self.plugin_metadata:
+            raise ValueError(f"Plugin {plugin_name} not found")
+            
+        if plugin_name in self.plugins:
+            logger.info(f"Plugin {plugin_name} is already loaded")
             return True
-        except Exception as e:
-            logger.error(f"保存插件 {plugin_name} 配置失败: {e}")
-            self._log_error(plugin_name, f"配置保存失败: {str(e)}")
-            return False
-    
-    async def reload_plugin(self, plugin_name: str) -> bool:
-        """重新加载插件"""
-        logger.info(f"正在重新加载插件: {plugin_name}")
-        
+            
+        logger.info(f"Loading plugin {plugin_name}")
         async with self._lock:
             try:
-                # 检查插件是否存在
-                if plugin_name not in self.plugin_modules:
-                    logger.error(f"插件 {plugin_name} 不存在，无法重新加载")
-                    return False
+                # Check dependencies
+                for dep_name in self.plugin_dependencies.get(plugin_name, set()):
+                    if dep_name not in self.plugins or self.plugins[dep_name].state != PluginState.ACTIVE:
+                        raise PluginDependencyError(
+                            f"Plugin {plugin_name} depends on {dep_name}, which is not loaded"
+                        )
                 
-                # 关闭插件
-                if plugin_name in self.plugins:
-                    old_plugin = self.plugins[plugin_name]
-                    await old_plugin.safe_shutdown()
-                    del self.plugins[plugin_name]
+                # Import plugin module
+                module = self.plugin_modules.get(plugin_name)
+                if not module:
+                    raise PluginLoadError(f"Plugin module for {plugin_name} not found")
+                    
+                # Find plugin class
+                plugin_class = None
+                for attr_name in dir(module):
+                    attr = getattr(module, attr_name)
+                    if (inspect.isclass(attr) and 
+                        issubclass(attr, Plugin) and 
+                        attr is not Plugin and
+                        hasattr(attr, 'initialize')):
+                        plugin_class = attr
+                        break
+                        
+                if not plugin_class:
+                    raise PluginLoadError(f"No Plugin subclass found in module for {plugin_name}")
+                    
+                # Create plugin instance
+                plugin = plugin_class()
                 
-                # 清理缓存
-                if plugin_name in self._plugin_cache:
-                    del self._plugin_cache[plugin_name]
-                if plugin_name in self._function_cache:
-                    del self._function_cache[plugin_name]
+                # Set metadata
+                if not hasattr(plugin, 'metadata') or not plugin.metadata:
+                    plugin.metadata = self.plugin_metadata.get(plugin_name)
+                    
+                # Set config
+                plugin.config = self.plugin_configs.get(plugin_name, {})
                 
-                # 重新加载模块
-                module_path = os.path.join(self.plugin_dir, f"{plugin_name.replace('.', os.sep)}.py")
-                self.plugin_modules[plugin_name] = await self.run_in_thread(
-                    safe_import_module, plugin_name, module_path, True)
+                # Connect to event bus and plugin manager
+                plugin._event_bus = self.event_bus
+                plugin._plugin_manager = self
                 
-                # 重新加载插件
-                await self._load_plugin(plugin_name)
+                # Add to plugin registry
+                self.plugins[plugin_name] = plugin
                 
-                # 更新重载计数
-                self._reload_count[plugin_name] = self._reload_count.get(plugin_name, 0) + 1
+                # Initialize plugin
+                plugin.state = PluginState.LOADING
+                success = await plugin.safe_initialize()
                 
-                logger.info(f"插件 {plugin_name} 重新加载成功")
+                if not success:
+                    raise PluginLoadError(f"Plugin {plugin_name} failed to initialize")
+                    
+                # Register plugin functions
+                if self.function_registry:
+                    await self._register_plugin_functions(plugin)
+                    
+                # Register event handlers
+                if self.event_bus:
+                    await self._register_plugin_event_handlers(plugin)
+                    
+                # Set default permissions
+                if self.permission_manager:
+                    # Basic read permissions by default
+                    self.permission_manager.add_plugin_role(plugin_name, "basic")
+                    
+                # Emit plugin loaded event
+                if self.event_bus:
+                    await self.event_bus.emit("plugin.loaded", {
+                        "plugin_name": plugin_name,
+                        "version": plugin.metadata.version if plugin.metadata else "unknown"
+                    })
+                    
+                logger.info(f"Plugin {plugin_name} loaded successfully")
                 return True
                 
             except Exception as e:
-                logger.error(f"重新加载插件 {plugin_name} 失败: {e}\n{traceback.format_exc()}")
-                self._log_error(plugin_name, f"重新加载失败: {str(e)}")
-                self.plugin_states[plugin_name] = PluginState.ERROR
-                return False
-    
-    async def enable_plugin(self, plugin_name: str) -> bool:
-        """启用插件"""
-        if (plugin_name in self.disabled_plugins):
-            self.disabled_plugins.remove(plugin_name)
-            # 如果插件已加载但被禁用，则重新加载
-            if plugin_name in self.plugin_modules and plugin_name not in self.plugins:
-                return await self.reload_plugin(plugin_name)
-            return True
-        return False
-    
-    async def disable_plugin(self, plugin_name: str) -> bool:
-        """禁用插件"""
-        if plugin_name not in self.disabled_plugins:
-            self.disabled_plugins.add(plugin_name)
-            # 如果插件已加载，则关闭它
-            if plugin_name in self.plugins:
-                await self.plugins[plugin_name].safe_shutdown()
-                del self.plugins[plugin_name]
-                self.plugin_states[plugin_name] = PluginState.DISABLED
-            return True
-        return False
-    
-    async def shutdown_plugins(self):
-        """关闭所有插件"""
-        logger.info("正在关闭所有插件...")
-        self.shutting_down = True
-        
-        # 发布插件系统关闭事件
-        if self._event_bus:
-            await self._event_bus.publish(
-                "plugin.system.shutdown", 
-                {"timestamp": time.time()}
-            )
-        
-        # 按依赖顺序的反向关闭插件
-        for plugin_name in reversed(self._load_order):
-            if plugin_name in self.plugins:
-                try:
-                    logger.debug(f"正在关闭插件: {plugin_name}")
+                logger.error(f"Error loading plugin {plugin_name}: {e}")
+                logger.debug(f"Plugin load error details: {traceback.format_exc()}")
+                
+                # Clean up if plugin was partially loaded
+                if plugin_name in self.plugins:
                     plugin = self.plugins[plugin_name]
                     await plugin.safe_shutdown()
-                    self.plugin_states[plugin_name] = PluginState.UNLOADED
-                    logger.debug(f"插件 {plugin_name} 已关闭")
-                except Exception as e:
-                    logger.error(f"关闭插件 {plugin_name} 失败: {e}")
-                    self._log_error(plugin_name, f"关闭失败: {str(e)}")
-        
-        # 停止任务
-        if self._watch_task:
-            self._watch_task.cancel()
-        if self._health_check_task:
-            self._health_check_task.cancel()
-        
-        # 关闭线程池
-        self._thread_pool.shutdown(wait=False)
-        
-        logger.info("所有插件已关闭")
-    
-    async def run_in_thread(self, func: Callable, *args, **kwargs):
-        """在线程池中运行函数"""
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            self._thread_pool,
-            lambda: func(*args, **kwargs)
-        )
-    
-    async def start_plugin_watcher(self):
-        """启动插件文件监视器"""
-        async def watch_plugins():
-            while not self.shutting_down:
-                try:
-                    # 检查配置文件变更
-                    for plugin_name in list(self.plugins.keys()):
-                        config_file = os.path.join(self.config_dir, f"{plugin_name}.yaml")
-                        if os.path.exists(config_file):
-                            mtime = os.path.getmtime(config_file)
-                            if plugin_name in self._config_mtimes and mtime > self._config_mtimes[plugin_name]:
-                                # 配置文件已更新
-                                try:
-                                    logger.info(f"检测到插件 {plugin_name} 配置变更")
-                                    config = load_yaml_config(config_file)
-                                    plugin = self.plugins[plugin_name]
-                                    result = await plugin.on_config_change(config)
-                                    if result:
-                                        self._config_mtimes[plugin_name] = mtime
-                                        self.plugin_configs[plugin_name] = config
-                                        self.plugin_stats[plugin_name]["config_version"] += 1
-                                except Exception as e:
-                                    logger.error(f"更新插件 {plugin_name} 配置失败: {e}")
+                    del self.plugins[plugin_name]
                     
-                    # 检查插件文件变更
-                    for plugin_name, old_hash in self._file_hashes.items():
-                        if plugin_name in self.disabled_plugins:
-                            continue
-                            
-                        module_path = os.path.join(self.plugin_dir, f"{plugin_name.replace('.', os.sep)}.py")
-                        if os.path.exists(module_path):
-                            current_hash = get_file_hash(module_path)
-                            if current_hash != old_hash:
-                                # 插件文件已更新
-                                logger.info(f"检测到插件 {plugin_name} 文件变更，自动重新加载")
-                                success = await self.reload_plugin(plugin_name)
-                                if success:
-                                    self._file_hashes[plugin_name] = current_hash
+                # Set error state in metadata
+                if plugin_name in self.plugin_metadata:
+                    metadata = self.plugin_metadata[plugin_name]
+                    metadata.state = PluginState.ERROR
+                    
+                if self.event_bus:
+                    await self.event_bus.emit("plugin.load_error", {
+                        "plugin_name": plugin_name,
+                        "error": str(e)
+                    })
+                    
+                # Re-raise as PluginLoadError
+                if not isinstance(e, (PluginLoadError, PluginDependencyError, PluginVersionError)):
+                    raise PluginLoadError(f"Failed to load plugin {plugin_name}: {e}") from e
+                raise
                 
-                except Exception as e:
-                    logger.error(f"插件监视器错误: {e}")
-                
-                # 每5秒检查一次
-                await asyncio.sleep(5)
-        
-        self._watch_task = asyncio.create_task(watch_plugins())
-        logger.info("插件文件监视器已启动")
+        return False
     
-    async def start_health_monitor(self):
-        """启动健康监控"""
-        async def health_check_loop():
-            while not self.shutting_down:
-                try:
-                    for plugin_name, plugin in list(self.plugins.items()):
-                        try:
-                            # 每个插件有5秒超时
-                            health_status = await asyncio.wait_for(
-                                plugin.check_health(),
-                                timeout=5.0
-                            )
-                            self.plugin_health[plugin_name] = health_status
-                            
-                            if health_status.get("status") != "healthy":
-                                logger.warning(f"插件 {plugin_name} 健康检查异常: {health_status}")
-                                
-                                # 如果插件状态严重异常，可以考虑重启插件
-                                if health_status.get("status") == "critical":
-                                    logger.error(f"插件 {plugin_name} 状态严重，尝试重启")
-                                    await self.reload_plugin(plugin_name)
-                            
-                        except asyncio.TimeoutError:
-                            logger.warning(f"插件 {plugin_name} 健康检查超时")
-                            self.plugin_health[plugin_name] = {"status": "timeout"}
-                        except Exception as e:
-                            logger.error(f"插件 {plugin_name} 健康检查失败: {e}")
-                            self.plugin_health[plugin_name] = {"status": "error", "error": str(e)}
+    async def unload_plugin(self, plugin_name: str) -> bool:
+        """
+        Unload a specific plugin
+        
+        Args:
+            plugin_name: Name of the plugin to unload
+            
+        Returns:
+            True if plugin was unloaded successfully, False otherwise
+        """
+        if plugin_name not in self.plugins:
+            logger.warning(f"Plugin {plugin_name} is not loaded")
+            return False
+            
+        logger.info(f"Unloading plugin {plugin_name}")
+        async with self._lock:
+            # Check for dependents
+            if plugin_name in self.plugin_dependents:
+                active_dependents = [
+                    dep for dep in self.plugin_dependents[plugin_name]
+                    if dep in self.plugins and self.plugins[dep].state == PluginState.ACTIVE
+                ]
+                if active_dependents:
+                    logger.warning(
+                        f"Cannot unload plugin {plugin_name} because it is required by: "
+                        f"{', '.join(active_dependents)}"
+                    )
+                    return False
+            
+            try:
+                plugin = self.plugins[plugin_name]
                 
-                except Exception as e:
-                    logger.error(f"健康监控错误: {e}")
+                # Unregister functions
+                if self.function_registry:
+                    await self.function_registry.unregister_plugin(plugin_name)
+                    
+                # Unregister event handlers
+                if self.event_bus and hasattr(plugin, '_event_handlers'):
+                    for event_name in plugin._event_handlers:
+                        for handler in plugin._event_handlers[event_name]:
+                            self.event_bus.unsubscribe(event_name, plugin_name)
                 
-                # 每60秒进行一次健康检查
-                await asyncio.sleep(60)
-        
-        self._health_check_task = asyncio.create_task(health_check_loop())
-        logger.info("插件健康监控已启动")
+                # Shutdown plugin
+                success = await plugin.safe_shutdown()
+                if not success:
+                    logger.warning(f"Plugin {plugin_name} did not shut down cleanly")
+                    
+                # Remove from plugin registry
+                del self.plugins[plugin_name]
+                
+                # Update plugin load order
+                if plugin_name in self.plugin_load_order:
+                    self.plugin_load_order.remove(plugin_name)
+                    
+                # Emit plugin unloaded event
+                if self.event_bus:
+                    await self.event_bus.emit("plugin.unloaded", {
+                        "plugin_name": plugin_name
+                    })
+                    
+                logger.info(f"Plugin {plugin_name} unloaded successfully")
+                return True
+                
+            except Exception as e:
+                logger.error(f"Error unloading plugin {plugin_name}: {e}")
+                logger.debug(f"Plugin unload error details: {traceback.format_exc()}")
+                
+                # Force remove from registry in case of error
+                if plugin_name in self.plugins:
+                    del self.plugins[plugin_name]
+                    
+                if self.event_bus:
+                    await self.event_bus.emit("plugin.unload_error", {
+                        "plugin_name": plugin_name,
+                        "error": str(e)
+                    })
+                    
+                return False
     
-    def _log_error(self, plugin_name: str, error_message: str):
-        """记录插件错误"""
-        error_entry = {
-            "plugin": plugin_name,
-            "time": datetime.now().isoformat(),
-            "message": error_message,
-            "traceback": traceback.format_exc()
-        }
-        self._error_log.append(error_entry)
+    async def reload_plugin(self, plugin_name: str) -> bool:
+        """
+        Reload a specific plugin
         
-        # 更新插件统计信息
-        if plugin_name in self.plugin_stats:
-            self.plugin_stats[plugin_name]["error_count"] = self.plugin_stats[plugin_name].get("error_count", 0) + 1
-            self.plugin_stats[plugin_name]["last_error"] = error_entry
+        Args:
+            plugin_name: Name of the plugin to reload
+            
+        Returns:
+            True if plugin was reloaded successfully, False otherwise
+        """
+        logger.info(f"Reloading plugin {plugin_name}")
         
-        # 保持错误日志大小在限制内
-        if len(self._error_log) > self._max_errors:
-            self._error_log = self._error_log[-self._max_errors:]
-    
-    async def send_plugin_message(self, sender: str, target: str, message: Any) -> bool:
-        """发送插件间消息"""
+        # Remember the plugin's position in the load order
+        load_position = self.plugin_load_order.index(plugin_name) if plugin_name in self.plugin_load_order else -1
+        
+        # Unload the plugin
+        if plugin_name in self.plugins:
+            unloaded = await self.unload_plugin(plugin_name)
+            if not unloaded:
+                logger.error(f"Failed to unload plugin {plugin_name} for reload")
+                return False
+                
+        # Reload the module
+        if plugin_name in self.plugin_modules:
+            module = self.plugin_modules[plugin_name]
+            try:
+                # Reload the module
+                importlib.reload(module)
+                logger.debug(f"Reloaded module for plugin {plugin_name}")
+            except Exception as e:
+                logger.error(f"Failed to reload module for plugin {plugin_name}: {e}")
+                return False
+                
+        # Load the plugin again
         try:
-            if target in self._message_queues:
-                # 构造消息
-                msg_obj = {
-                    "sender": sender,
-                    "content": message,
-                    "timestamp": time.time()
-                }
+            loaded = await self.load_plugin(plugin_name)
+            if loaded:
+                # Restore load position if possible
+                if load_position >= 0 and plugin_name in self.plugin_load_order:
+                    self.plugin_load_order.remove(plugin_name)
+                    self.plugin_load_order.insert(min(load_position, len(self.plugin_load_order)), plugin_name)
+                    
+                logger.info(f"Plugin {plugin_name} reloaded successfully")
                 
-                # 使用超时避免阻塞
+                # Emit plugin reloaded event
+                if self.event_bus:
+                    await self.event_bus.emit("plugin.reloaded", {
+                        "plugin_name": plugin_name
+                    })
+                    
+                return True
+        except Exception as e:
+            logger.error(f"Failed to reload plugin {plugin_name}: {e}")
+            
+        return False
+    
+    async def update_plugin_config(self, plugin_name: str, config: Dict[str, Any]) -> bool:
+        """
+        Update configuration for a plugin
+        
+        Args:
+            plugin_name: Name of the plugin
+            config: New configuration dictionary
+            
+        Returns:
+            True if configuration was updated successfully, False otherwise
+        """
+        if plugin_name not in self.plugin_metadata:
+            logger.warning(f"Cannot update config for unknown plugin {plugin_name}")
+            return False
+            
+        logger.info(f"Updating configuration for plugin {plugin_name}")
+        
+        try:
+            # Update stored config
+            self.plugin_configs[plugin_name] = config
+            
+            # Save to file
+            config_file = os.path.join(self.config_dir, f"{plugin_name}.json")
+            os.makedirs(os.path.dirname(config_file), exist_ok=True)
+            with open(config_file, 'w') as f:
+                json.dump(config, f, indent=2)
+                
+            # Update running plugin if loaded
+            if plugin_name in self.plugins:
+                plugin = self.plugins[plugin_name]
+                if hasattr(plugin, 'on_config_change'):
+                    success = await plugin.on_config_change(config)
+                    if not success:
+                        logger.warning(f"Plugin {plugin_name} rejected configuration change")
+                        return False
+                        
+            logger.info(f"Configuration updated for plugin {plugin_name}")
+            
+            # Emit config changed event
+            if self.event_bus:
+                await self.event_bus.emit("plugin.config_changed", {
+                    "plugin_name": plugin_name
+                })
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error updating configuration for plugin {plugin_name}: {e}")
+            return False
+    
+    async def _register_plugin_functions(self, plugin: Plugin) -> None:
+        """
+        Register plugin functions with function registry
+        
+        Args:
+            plugin: Plugin instance
+        """
+        if not self.function_registry or not hasattr(plugin, '_functions'):
+            return
+            
+        plugin_name = plugin.metadata.name if plugin.metadata else "unknown"
+        
+        for func_name, func_wrapper in plugin._functions.items():
+            if hasattr(func_wrapper, 'func'):
+                await self.function_registry.register_function(
+                    plugin_name,
+                    func_wrapper.func,
+                    func_wrapper.name,
+                    func_wrapper.description
+                )
+    
+    async def _register_plugin_event_handlers(self, plugin: Plugin) -> None:
+        """
+        Register plugin event handlers with event bus
+        
+        Args:
+            plugin: Plugin instance
+        """
+        if not self.event_bus or not hasattr(plugin, '_event_handlers'):
+            return
+            
+        plugin_name = plugin.metadata.name if plugin.metadata else "unknown"
+        
+        for event_name, handlers in plugin._event_handlers.items():
+            for handler in handlers:
+                self.event_bus.subscribe(event_name, handler, plugin_name)
+    
+    def get_plugin(self, plugin_name: str) -> Optional[Plugin]:
+        """
+        Get a loaded plugin by name
+        
+        Args:
+            plugin_name: Name of the plugin
+            
+        Returns:
+            Plugin instance or None if not found
+        """
+        return self.plugins.get(plugin_name)
+    
+    def get_plugin_metadata(self, plugin_name: str) -> Optional[PluginMetadata]:
+        """
+        Get metadata for a plugin
+        
+        Args:
+            plugin_name: Name of the plugin
+            
+        Returns:
+            PluginMetadata instance or None if not found
+        """
+        return self.plugin_metadata.get(plugin_name)
+    
+    def get_plugin_config(self, plugin_name: str) -> Dict[str, Any]:
+        """
+        Get configuration for a plugin
+        
+        Args:
+            plugin_name: Name of the plugin
+            
+        Returns:
+            Configuration dictionary, empty dict if not found
+        """
+        return self.plugin_configs.get(plugin_name, {})
+    
+    def get_plugin_status(self, plugin_name: str) -> Dict[str, Any]:
+        """
+        Get status information for a plugin
+        
+        Args:
+            plugin_name: Name of the plugin
+            
+        Returns:
+            Status dictionary, empty dict if not found
+        """
+        if plugin_name in self.plugins:
+            plugin = self.plugins[plugin_name]
+            return plugin.get_status()
+            
+        if plugin_name in self.plugin_metadata:
+            metadata = self.plugin_metadata[plugin_name]
+            return {
+                "name": metadata.name,
+                "version": metadata.version,
+                "state": PluginState.UNLOADED,
+                "initialized": False
+            }
+            
+        return {}
+    
+    def get_all_plugins(self) -> List[str]:
+        """
+        Get list of all discovered plugins
+        
+        Returns:
+            List of plugin names
+        """
+        return list(self.plugin_metadata.keys())
+    
+    def get_loaded_plugins(self) -> List[str]:
+        """
+        Get list of all loaded plugins
+        
+        Returns:
+            List of loaded plugin names
+        """
+        return list(self.plugins.keys())
+    
+    def get_plugin_dependencies(self, plugin_name: str) -> List[str]:
+        """
+        Get dependencies for a plugin
+        
+        Args:
+            plugin_name: Name of the plugin
+            
+        Returns:
+            List of dependency plugin names
+        """
+        return list(self.plugin_dependencies.get(plugin_name, set()))
+    
+    def get_plugin_dependents(self, plugin_name: str) -> List[str]:
+        """
+        Get plugins that depend on a specific plugin
+        
+        Args:
+            plugin_name: Name of the plugin
+            
+        Returns:
+            List of dependent plugin names
+        """
+        return list(self.plugin_dependents.get(plugin_name, set()))
+    
+    async def send_plugin_message(self, source_plugin: str, target_plugin: str, message: Any) -> bool:
+        """
+        Send a message from one plugin to another
+        
+        Args:
+            source_plugin: Name of the source plugin
+            target_plugin: Name of the target plugin
+            message: Message data
+            
+        Returns:
+            True if message was delivered, False otherwise
+        """
+        if target_plugin not in self.plugins:
+            logger.warning(f"Cannot send message to non-existent plugin {target_plugin}")
+            return False
+            
+        target = self.plugins[target_plugin]
+        
+        try:
+            # Wrap message with source information
+            wrapped_message = {
+                "source": source_plugin,
+                "timestamp": time.time(),
+                "data": message
+            }
+            
+            # Add to target's message queue
+            if hasattr(target, '_message_queue'):
                 try:
+                    # Add with timeout to avoid blocking
                     await asyncio.wait_for(
-                        self._message_queues[target].put(msg_obj),
-                        timeout=1.0
+                        target._message_queue.put(wrapped_message),
+                        timeout=0.5
                     )
                     return True
                 except asyncio.TimeoutError:
-                    logger.warning(f"向插件 {target} 发送消息超时")
+                    logger.warning(f"Message queue full for plugin {target_plugin}")
                     return False
-            else:
-                logger.warning(f"目标插件 {target} 不存在或未加载")
-                return False
+                    
+            return False
+            
         except Exception as e:
-            logger.error(f"发送消息失败: {e}")
+            logger.error(f"Error sending message to plugin {target_plugin}: {e}")
             return False
     
-    async def broadcast_message(self, sender: str, message: Any, exclude: List[str] = None) -> Dict[str, bool]:
-        """广播消息到所有插件"""
-        results = {}
-        exclude = exclude or []
+    def register_shared_resource(self, name: str, resource: Any) -> None:
+        """
+        Register a shared resource accessible to all plugins
         
-        for plugin_name in self.plugins:
-            if plugin_name not in exclude and plugin_name != sender:
-                results[plugin_name] = await self.send_plugin_message(sender, plugin_name, message)
-        
-        return results
+        Args:
+            name: Resource name
+            resource: Resource object
+        """
+        self.shared_resources[name] = resource
+        logger.debug(f"Registered shared resource: {name}")
     
-    def get_plugin_status(self) -> Dict[str, Dict[str, Any]]:
-        """获取所有插件的状态"""
-        status = {}
-        for plugin_name, state in self.plugin_states.items():
-            plugin_status = {
-                "state": state,
-                "enabled": plugin_name not in self.disabled_plugins
-            }
-            
-            if plugin_name in self.plugins:
-                plugin = self.plugins[plugin_name]
-                plugin_status.update({
-                    "metadata": plugin.metadata.__dict__ if plugin.metadata else {},
-                    "initialized": plugin._initialized,
-                    "error_count": plugin._error_count,
-                    "config_version": plugin._config_version,
-                    "uptime": time.time() - plugin.start_time if plugin.start_time else 0,
-                    "health": self.plugin_health.get(plugin_name, {"status": "unknown"})
-                })
-            
-            if plugin_name in self.plugin_stats:
-                plugin_status["stats"] = self.plugin_stats[plugin_name]
-            
-            status[plugin_name] = plugin_status
+    def unregister_shared_resource(self, name: str) -> bool:
+        """
+        Unregister a shared resource
         
-        return status
-    
-    def get_plugin_errors(self, plugin_name: str = None) -> List[Dict[str, Any]]:
-        """获取插件错误日志"""
-        if plugin_name:
-            return [error for error in self._error_log if error["plugin"] == plugin_name]
-        return self._error_log
-    
-    def get_plugin_api_schema(self, plugin_name: str) -> Optional[Dict[str, Any]]:
-        """获取插件API模式"""
-        if plugin_name in self.plugins:
-            return self.plugins[plugin_name].get_api_schema()
-        return None
-    
-    async def call_plugin_function(self, plugin_name: str, function_name: str, *args, **kwargs) -> Any:
-        """调用插件函数"""
-        if plugin_name not in self.plugins:
-            raise ValueError(f"插件 {plugin_name} 不存在或未加载")
+        Args:
+            name: Resource name
             
-        plugin = self.plugins[plugin_name]
-        func = plugin.get_function(function_name)
-        
-        if not func:
-            raise ValueError(f"插件 {plugin_name} 中不存在函数 {function_name}")
-            
-        try:
-            return await func(*args, **kwargs)
-        except Exception as e:
-            logger.error(f"调用插件函数 {plugin_name}.{function_name} 失败: {e}")
-            self._log_error(plugin_name, f"函数调用失败: {function_name} - {str(e)}")
-            raise
-    
-    async def grant_permission(self, plugin_name: str, permission: str) -> bool:
-        """授予插件权限"""
-        if plugin_name not in self.plugin_permissions:
-            self.plugin_permissions[plugin_name] = set()
-        
-        self.plugin_permissions[plugin_name].add(permission)
-        
-        # 如果插件已加载，更新其权限
-        if plugin_name in self.plugins:
-            self.plugins[plugin_name]._permissions = self.plugin_permissions[plugin_name]
-        
-        logger.info(f"授予插件 {plugin_name} 权限: {permission}")
-        return True
-    
-    async def revoke_permission(self, plugin_name: str, permission: str) -> bool:
-        """撤销插件权限"""
-        if plugin_name in self.plugin_permissions:
-            self.plugin_permissions[plugin_name].discard(permission)
-            
-            # 如果插件已加载，更新其权限
-            if plugin_name in self.plugins:
-                self.plugins[plugin_name]._permissions = self.plugin_permissions[plugin_name]
-            
-            logger.info(f"撤销插件 {plugin_name} 权限: {permission}")
+        Returns:
+            True if resource was unregistered, False if not found
+        """
+        if name in self.shared_resources:
+            del self.shared_resources[name]
+            logger.debug(f"Unregistered shared resource: {name}")
             return True
         return False
     
-    def get_system_status(self) -> Dict[str, Any]:
-        """获取插件系统状态"""
-        return {
-            "initialized": self.initialized,
-            "plugin_count": len(self.plugins),
-            "total_plugins_found": len(self.plugin_modules),
-            "disabled_plugins": len(self.disabled_plugins),
-            "error_count": len(self._error_log),
-            "system_info": self._system_info,
-            "uptime": time.time() - self._system_info.get("start_time", time.time()),
-        }
+    def get_shared_resource(self, name: str) -> Optional[Any]:
+        """
+        Get a shared resource
+        
+        Args:
+            name: Resource name
+            
+        Returns:
+            Resource object or None if not found
+        """
+        return self.shared_resources.get(name)
     
-    async def handle_topic(self, topic: str, data: Any) -> bool:
-        """处理来自消息总线的主题，并转发给相关插件"""
-        handled = False
+    def get_all_shared_resources(self) -> Dict[str, Any]:
+        """
+        Get all shared resources
         
-        # 查找是否有插件注册了对此主题的处理器
-        for plugin_name, plugin in self.plugins.items():
-            if hasattr(plugin, "handle_topic"):
-                try:
-                    plugin_handled = await plugin.handle_topic(topic, data)
-                    if plugin_handled:
-                        handled = True
-                        logger.debug(f"插件 {plugin_name} 处理了主题: {topic}")
-                except Exception as e:
-                    logger.error(f"插件 {plugin_name} 处理主题 {topic} 时出错: {e}")
-                    self._log_error(plugin_name, f"主题处理失败: {topic} - {str(e)}")
+        Returns:
+            Dictionary of resource names to objects
+        """
+        return dict(self.shared_resources)
+    
+    async def check_plugin_health(self, plugin_name: str) -> Dict[str, Any]:
+        """
+        Check health of a specific plugin
         
-        return handled
+        Args:
+            plugin_name: Name of the plugin
+            
+        Returns:
+            Health status dictionary
+        """
+        if plugin_name not in self.plugins:
+            return {"status": "not_loaded", "plugin": plugin_name}
+            
+        plugin = self.plugins[plugin_name]
+        
+        try:
+            if hasattr(plugin, 'check_health'):
+                health = await plugin.check_health()
+                return health
+            return {"status": plugin.state, "plugin": plugin_name}
+        except Exception as e:
+            logger.error(f"Error checking health for plugin {plugin_name}: {e}")
+            return {
+                "status": "error",
+                "plugin": plugin_name,
+                "error": str(e)
+            }
+    
+    async def check_all_plugins_health(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Check health of all loaded plugins
+        
+        Returns:
+            Dictionary mapping plugin names to health status
+        """
+        results = {}
+        
+        for plugin_name in self.plugins:
+            results[plugin_name] = await self.check_plugin_health(plugin_name)
+            
+        return results

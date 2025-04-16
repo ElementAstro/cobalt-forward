@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class Plugin(ABC):
-    """插件基类，提供插件生命周期管理和各种功能"""
+    """Base plugin class providing lifecycle management and various functionality"""
     
     def __init__(self):
         self.metadata: PluginMetadata = None
@@ -40,20 +40,20 @@ class Plugin(ABC):
         self._permissions: Set[str] = set()
         self._sandbox = PluginSandbox()
         self._metrics = PluginMetrics()
-        self._message_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)  # 限制队列大小
+        self._message_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)  # Limit queue size
         self._thread_pool: Optional[ThreadPoolExecutor] = None
         self._local_storage = threading.local()
-        self._plugin_manager = None  # 引用插件管理器
-        self._event_bus = None       # 引用事件总线
-        self._lock = asyncio.Lock()  # 保护关键操作的锁
-        self._initialized = False    # 初始化标志
-        self._shutdown_complete = False  # 关闭完成标志
-        self._config_version = 0     # 配置版本号
-        self._error_count = 0        # 错误计数
-        self._last_error = None      # 最后一次错误
+        self._plugin_manager = None  # Reference to plugin manager
+        self._event_bus = None       # Reference to event bus
+        self._lock = asyncio.Lock()  # Lock for critical operations
+        self._initialized = False    # Initialization flag
+        self._shutdown_complete = False  # Shutdown completion flag
+        self._config_version = 0     # Configuration version
+        self._error_count = 0        # Error counter
+        self._last_error = None      # Last error information
 
     def _init_thread_pool(self, max_workers: int = 3):
-        """初始化线程池"""
+        """Initialize thread pool"""
         if self._thread_pool is None:
             self._thread_pool = ThreadPoolExecutor(
                 max_workers=max_workers, 
@@ -61,41 +61,41 @@ class Plugin(ABC):
             )
     
     def _shutdown_thread_pool(self):
-        """关闭线程池"""
+        """Shut down thread pool"""
         if self._thread_pool:
             self._thread_pool.shutdown(wait=False)
             self._thread_pool = None
 
     @abstractmethod
     async def initialize(self) -> None:
-        """插件初始化，必须由子类实现"""
+        """Plugin initialization, must be implemented by subclass"""
         pass
 
     @abstractmethod
     async def shutdown(self) -> None:
-        """插件关闭，必须由子类实现"""
+        """Plugin shutdown, must be implemented by subclass"""
         pass
 
     async def safe_initialize(self) -> bool:
-        """安全的初始化包装器"""
+        """Safe initialization wrapper"""
         if self._initialized:
             return True
             
         try:
-            # 执行前置初始化钩子
+            # Execute pre-initialization hooks
             for hook in self._lifecycle_hooks.get("pre_initialize", []):
                 if asyncio.iscoroutinefunction(hook):
                     await hook()
                 else:
                     hook()
                     
-            # 初始化线程池
+            # Initialize thread pool
             self._init_thread_pool()
             
-            # 执行子类的初始化方法
+            # Execute subclass initialization method
             await self.initialize()
             
-            # 执行后置初始化钩子
+            # Execute post-initialization hooks
             for hook in self._lifecycle_hooks.get("post_initialize", []):
                 if asyncio.iscoroutinefunction(hook):
                     await hook()
@@ -105,6 +105,7 @@ class Plugin(ABC):
             self._initialized = True
             self.state = PluginState.ACTIVE
             self.start_time = time.time()
+            logger.info(f"Plugin {self.metadata.name if self.metadata else 'unknown'} initialized successfully")
             return True
             
         except Exception as e:
@@ -115,36 +116,36 @@ class Plugin(ABC):
                 "traceback": traceback.format_exc()
             }
             self.state = PluginState.ERROR
-            logger.error(f"插件 {self.metadata.name if self.metadata else 'unknown'} 初始化失败: {e}")
+            logger.error(f"Plugin {self.metadata.name if self.metadata else 'unknown'} initialization failed: {e}")
             return False
 
     async def safe_shutdown(self) -> bool:
-        """安全的关闭包装器"""
+        """Safe shutdown wrapper"""
         if self._shutdown_complete:
             return True
             
         try:
-            # 执行前置关闭钩子
+            # Execute pre-shutdown hooks
             for hook in self._lifecycle_hooks.get("pre_shutdown", []):
                 if asyncio.iscoroutinefunction(hook):
                     await hook()
                 else:
                     hook()
                     
-            # 执行子类的关闭方法
+            # Execute subclass shutdown method
             await self.shutdown()
             
-            # 执行后置关闭钩子
+            # Execute post-shutdown hooks
             for hook in self._lifecycle_hooks.get("post_shutdown", []):
                 if asyncio.iscoroutinefunction(hook):
                     await hook()
                 else:
                     hook()
             
-            # 清理线程池
+            # Clean up thread pool
             self._shutdown_thread_pool()
             
-            # 清空队列
+            # Clear queue
             while not self._message_queue.empty():
                 try:
                     self._message_queue.get_nowait()
@@ -153,6 +154,7 @@ class Plugin(ABC):
                     
             self._shutdown_complete = True
             self.state = PluginState.UNLOADED
+            logger.info(f"Plugin {self.metadata.name if self.metadata else 'unknown'} shutdown successfully")
             return True
             
         except Exception as e:
@@ -162,65 +164,65 @@ class Plugin(ABC):
                 "error": str(e),
                 "traceback": traceback.format_exc()
             }
-            logger.error(f"插件 {self.metadata.name if self.metadata else 'unknown'} 关闭失败: {e}")
+            logger.error(f"Plugin {self.metadata.name if self.metadata else 'unknown'} shutdown failed: {e}")
             return False
 
     async def on_config_change(self, new_config: Dict[str, Any]) -> bool:
-        """配置变更处理，支持验证配置"""
+        """Handle configuration change, supports config validation"""
         try:
-            # 验证新配置
+            # Validate new config
             if hasattr(self, 'validate_config'):
                 valid = await self.validate_config(new_config)
                 if not valid:
-                    logger.warning(f"插件 {self.metadata.name if self.metadata else 'unknown'} 配置验证失败")
+                    logger.warning(f"Plugin {self.metadata.name if self.metadata else 'unknown'} configuration validation failed")
                     return False
             
-            # 更新配置
+            # Update config
             old_config = self.config.copy()
             self.config = new_config
             self._config_version += 1
             
-            # 记录配置变更
-            logger.info(f"插件 {self.metadata.name if self.metadata else 'unknown'} 配置已更新")
+            # Log config change
+            logger.info(f"Plugin {self.metadata.name if self.metadata else 'unknown'} configuration updated")
             
-            # 刷新沙箱缓存
+            # Reset sandbox cache
             self._sandbox.reset_cache()
             
             return True
         except Exception as e:
-            logger.error(f"处理配置变更失败: {e}")
+            logger.error(f"Configuration change processing failed: {e}")
             return False
 
     def register_hook(self, hook_name: str, callback: Callable) -> None:
-        """注册钩子函数，线程安全"""
+        """Register hook function, thread-safe"""
         if hook_name not in self._hooks:
             self._hooks[hook_name] = []
         if callback not in self._hooks[hook_name]:
             self._hooks[hook_name].append(callback)
 
     def unregister_hook(self, hook_name: str, callback: Callable) -> bool:
-        """取消钩子函数注册，线程安全"""
+        """Unregister hook function, thread-safe"""
         if hook_name in self._hooks and callback in self._hooks[hook_name]:
             self._hooks[hook_name].remove(callback)
             return True
         return False
 
     def register_event_handler(self, event_name: str, handler: Callable) -> None:
-        """注册事件处理器，线程安全"""
+        """Register event handler, thread-safe"""
         if event_name not in self._event_handlers:
             self._event_handlers[event_name] = []
         if handler not in self._event_handlers[event_name]:
             self._event_handlers[event_name].append(handler)
 
     def unregister_event_handler(self, event_name: str, handler: Callable) -> bool:
-        """取消事件处理器注册，线程安全"""
+        """Unregister event handler, thread-safe"""
         if event_name in self._event_handlers and handler in self._event_handlers[event_name]:
             self._event_handlers[event_name].remove(handler)
             return True
         return False
 
     async def handle_event(self, event_name: str, event_data: Any) -> List[Any]:
-        """处理事件，返回处理结果列表"""
+        """Handle event, returns list of handler results"""
         results = []
         start_time = time.time()
         
@@ -233,17 +235,17 @@ class Plugin(ABC):
                         result = handler(event_data)
                     results.append(result)
                 except Exception as e:
-                    logger.error(f"事件处理器 {handler.__name__} 执行失败: {e}")
+                    logger.error(f"Event handler {handler.__name__} execution failed: {e}")
                     self._metrics.record_error()
         
-        # 记录执行指标
+        # Record execution metrics
         execution_time = time.time() - start_time
         self._metrics.record_execution(execution_time)
         
         return results
 
     def add_lifecycle_hook(self, stage: str, callback: Callable) -> bool:
-        """添加生命周期钩子，线程安全"""
+        """Add lifecycle hook, thread-safe"""
         if stage in self._lifecycle_hooks:
             if callback not in self._lifecycle_hooks[stage]:
                 self._lifecycle_hooks[stage].append(callback)
@@ -251,12 +253,12 @@ class Plugin(ABC):
         return False
 
     async def check_health(self) -> Dict[str, Any]:
-        """检查插件健康状态，添加超时处理"""
+        """Check plugin health status with timeout handling"""
         try:
-            # 使用超时限制健康检查执行时间
+            # Limit health check execution time
             health_result = await asyncio.wait_for(
                 self._health_check(), 
-                timeout=5.0  # 5秒超时
+                timeout=5.0  # 5 second timeout
             )
             self.health_status = health_result
             self.last_health_check = time.time()
@@ -276,7 +278,7 @@ class Plugin(ABC):
             return self.health_status
 
     async def _health_check(self) -> Dict[str, Any]:
-        """默认健康检查实现"""
+        """Default health check implementation"""
         return {
             "status": "healthy",
             "initialized": self._initialized,
@@ -286,29 +288,29 @@ class Plugin(ABC):
         }
 
     async def validate_config(self, config: Dict[str, Any]) -> bool:
-        """验证配置，支持JSON Schema验证"""
+        """Validate configuration, supports JSON Schema validation"""
         if not hasattr(self.metadata, 'config_schema') or not self.metadata.config_schema:
             return True
             
         try:
-            # 如果有jsonschema模块，使用它进行验证
+            # Use jsonschema module if available
             try:
                 import jsonschema
                 jsonschema.validate(instance=config, schema=self.metadata.config_schema)
             except ImportError:
-                # 简单验证：检查所有必需字段是否存在
+                # Simple validation: check if all required fields exist
                 required_fields = self.metadata.config_schema.get('required', [])
                 for field in required_fields:
                     if field not in config:
-                        logger.error(f"缺少必需的配置字段: {field}")
+                        logger.error(f"Missing required configuration field: {field}")
                         return False
             return True
         except Exception as e:
-            logger.error(f"配置验证失败: {e}")
+            logger.error(f"Configuration validation failed: {e}")
             return False
 
     def export_function(self, name: str = None, description: str = None):
-        """导出函数装饰器，优化缓存管理"""
+        """Function export decorator, optimized cache management"""
         def decorator(func):
             func_name = name or func.__name__
             wrapped = PluginFunction(func, func_name, description)
@@ -317,21 +319,21 @@ class Plugin(ABC):
         return decorator
 
     def export_type(self, type_class: Type, name: str = None):
-        """导出类型，支持类型检查"""
+        """Export type, supports type checking"""
         type_name = name or type_class.__name__
         self._exported_types[type_name] = type_class
         return type_class
 
     def get_function(self, name: str) -> Optional[PluginFunction]:
-        """获取导出的函数"""
+        """Get exported function"""
         return self._functions.get(name)
 
     def get_type(self, name: str) -> Optional[Type]:
-        """获取导出的类型"""
+        """Get exported type"""
         return self._exported_types.get(name)
 
     def get_api_schema(self) -> Dict[str, Any]:
-        """获取插件API模式，包含更多信息"""
+        """Get plugin API schema with extended information"""
         schema = {
             "functions": {},
             "types": {},
@@ -340,7 +342,7 @@ class Plugin(ABC):
             "version": self.metadata.version if self.metadata else "unknown"
         }
 
-        # 收集函数信息
+        # Collect function information
         for name, func in self._functions.items():
             if hasattr(func, 'get_signature_info'):
                 schema["functions"][name] = func.get_signature_info()
@@ -351,18 +353,18 @@ class Plugin(ABC):
                     "is_async": asyncio.iscoroutinefunction(func.func if hasattr(func, 'func') else func)
                 }
 
-        # 收集类型信息
+        # Collect type information
         for name, type_class in self._exported_types.items():
             type_info = {"fields": {}}
             
-            # 处理数据类
+            # Handle dataclasses
             if hasattr(type_class, "__dataclass_fields__"):
                 for field_name, field_obj in type_class.__dataclass_fields__.items():
                     type_info["fields"][field_name] = {
                         "type": str(field_obj.type),
                         "default": field_obj.default if field_obj.default is not field_obj.default_factory else "has_factory"
                     }
-            # 处理普通类
+            # Handle regular classes
             elif hasattr(type_class, "__annotations__"):
                 for field_name, field_type in type_class.__annotations__.items():
                     type_info["fields"][field_name] = {
@@ -375,19 +377,19 @@ class Plugin(ABC):
         return schema
 
     async def send_message(self, target_plugin: str, message: Any) -> bool:
-        """发送消息到其他插件，支持超时"""
+        """Send message to another plugin with timeout support"""
         if not self._plugin_manager:
-            logger.warning(f"插件 {self.metadata.name if self.metadata else 'unknown'} 尝试发送消息，但插件管理器未连接")
+            logger.warning(f"Plugin {self.metadata.name if self.metadata else 'unknown'} tried to send message but plugin manager is not connected")
             return False
             
         try:
-            # 限制消息大小
+            # Limit message size
             message_str = json.dumps(message) if not isinstance(message, str) else message
-            if len(message_str) > 1024 * 1024:  # 1MB限制
-                logger.warning(f"消息过大 ({len(message_str)} bytes)，已被拒绝")
+            if len(message_str) > 1024 * 1024:  # 1MB limit
+                logger.warning(f"Message too large ({len(message_str)} bytes), rejected")
                 return False
                 
-            # 发送消息，带5秒超时
+            # Send message with 5 second timeout
             return await asyncio.wait_for(
                 self._plugin_manager.send_plugin_message(
                     self.metadata.name if self.metadata else "unknown", 
@@ -397,35 +399,35 @@ class Plugin(ABC):
                 timeout=5.0
             )
         except asyncio.TimeoutError:
-            logger.error(f"发送消息到插件 {target_plugin} 超时")
+            logger.error(f"Send message to plugin {target_plugin} timed out")
             return False
         except Exception as e:
-            logger.error(f"发送消息失败: {e}")
+            logger.error(f"Send message failed: {e}")
             return False
 
     def run_in_sandbox(self, func: Callable, *args, **kwargs):
-        """在沙箱中运行函数，带异常处理"""
+        """Run function in sandbox with exception handling"""
         start_time = time.time()
         try:
             with self._sandbox.apply():
                 result = func(*args, **kwargs)
                 
-                # 记录执行指标
+                # Record execution metrics
                 execution_time = time.time() - start_time
                 self._metrics.record_execution(execution_time)
                 
                 return result
         except Exception as e:
-            # 记录错误
+            # Record error
             execution_time = time.time() - start_time
             self._metrics.record_execution(execution_time)
             self._metrics.record_error()
             
-            # 重新抛出带上下文的异常
-            raise type(e)(f"沙箱执行失败: {str(e)}")
+            # Re-raise exception with context
+            raise type(e)(f"Sandbox execution failed: {str(e)}")
 
     async def run_in_thread(self, func: Callable, *args, **kwargs):
-        """在线程池中运行函数，异步等待结果"""
+        """Run function in thread pool, wait for result asynchronously"""
         if self._thread_pool is None:
             self._init_thread_pool()
             
@@ -436,10 +438,10 @@ class Plugin(ABC):
         )
 
     async def get_messages(self, timeout: float = 0.1) -> List[Any]:
-        """获取待处理消息，支持超时参数"""
+        """Get pending messages with timeout support"""
         messages = []
         try:
-            # 尝试在指定时间内获取消息
+            # Try to get messages within timeout
             while True:
                 try:
                     message = await asyncio.wait_for(
@@ -449,15 +451,15 @@ class Plugin(ABC):
                     messages.append(message)
                     self._message_queue.task_done()
                 except asyncio.TimeoutError:
-                    # 超时，返回已获取的消息
+                    # Timeout, return collected messages
                     break
         except Exception as e:
-            logger.error(f"获取消息时出错: {e}")
+            logger.error(f"Error getting messages: {e}")
             
         return messages
         
     def get_status(self) -> Dict[str, Any]:
-        """获取插件状态"""
+        """Get plugin status"""
         return {
             "name": self.metadata.name if self.metadata else "unknown",
             "version": self.metadata.version if self.metadata else "unknown",
@@ -473,7 +475,7 @@ class Plugin(ABC):
         }
         
     def __del__(self):
-        """确保资源被正确清理"""
+        """Ensure resources are properly cleaned up"""
         try:
             self._shutdown_thread_pool()
         except:

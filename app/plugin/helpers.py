@@ -1,17 +1,15 @@
-import asyncio
-import logging
-import time
-import inspect
-import functools
-import traceback
 from typing import Dict, List, Any, Callable, Optional, TypeVar, Generic, Union
 from functools import wraps
-import os
-import json
 from datetime import datetime, timedelta
-import hashlib
-import uuid
+import logging
+import asyncio
+import time
 import threading
+import hashlib
+import json
+import os
+import uuid
+import traceback
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +17,7 @@ T = TypeVar('T')
 
 
 class AsyncCache(Generic[T]):
-    """异步缓存装饰器，用于缓存异步函数的结果"""
+    """Asynchronous cache decorator for caching asynchronous function results"""
     
     def __init__(self, ttl: float = 60.0, max_size: int = 100):
         self.ttl = ttl
@@ -31,31 +29,31 @@ class AsyncCache(Generic[T]):
     def __call__(self, func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
-            # 生成缓存键
+            # Generate cache key
             cache_key = self._generate_key(func.__name__, args, kwargs)
             
-            # 检查缓存是否有效
+            # Check if cache is valid
             if cache_key in self.cache:
                 entry = self.cache[cache_key]
                 if time.time() < entry["expires_at"]:
                     self.access_times[cache_key] = time.time()
                     return entry["value"]
             
-            # 如果没有缓存或缓存已过期，执行函数
+            # If no cache or cache expired, execute function
             result = await func(*args, **kwargs)
             
-            # 存储结果
+            # Store result
             self.cache[cache_key] = {
                 "value": result,
                 "expires_at": time.time() + self.ttl
             }
             self.access_times[cache_key] = time.time()
             
-            # 如果缓存太大，清理最旧的条目
+            # If cache is too large, clean up oldest entries
             if len(self.cache) > self.max_size:
                 self._cleanup_oldest()
                 
-            # 启动清理任务(如果尚未启动)
+            # Start cleanup task (if not already started)
             if self._cleanup_task is None or self._cleanup_task.done():
                 self._cleanup_task = asyncio.create_task(self._cleanup_loop())
                 
@@ -64,23 +62,23 @@ class AsyncCache(Generic[T]):
         return wrapper
     
     def _generate_key(self, func_name: str, args: tuple, kwargs: dict) -> str:
-        """生成缓存键"""
+        """Generate cache key"""
         key_parts = [func_name]
         
-        # 处理位置参数
+        # Handle positional arguments
         for arg in args:
             key_parts.append(str(arg))
             
-        # 处理关键字参数
+        # Handle keyword arguments
         for k, v in sorted(kwargs.items()):
             key_parts.append(f"{k}={v}")
             
-        # 使用哈希值作为键
+        # Use hash as key
         key_str = "|".join(key_parts)
         return hashlib.md5(key_str.encode()).hexdigest()
     
     def _cleanup_oldest(self):
-        """清理最旧的缓存条目"""
+        """Clean up oldest cache entries"""
         if not self.access_times:
             return
             
@@ -91,10 +89,10 @@ class AsyncCache(Generic[T]):
             del self.access_times[oldest_key]
     
     async def _cleanup_loop(self):
-        """定期清理过期缓存"""
+        """Periodically clean up expired cache"""
         try:
             while True:
-                # 清理过期条目
+                # Clean up expired entries
                 now = time.time()
                 expired_keys = []
                 
@@ -108,18 +106,18 @@ class AsyncCache(Generic[T]):
                     if key in self.access_times:
                         del self.access_times[key]
                 
-                # 每10秒清理一次
+                # Clean up every 10 seconds
                 await asyncio.sleep(10)
         except asyncio.CancelledError:
             pass
     
     def clear(self):
-        """清除所有缓存"""
+        """Clear all cache"""
         self.cache.clear()
         self.access_times.clear()
     
     def invalidate(self, func_name: str, *args, **kwargs):
-        """使特定的缓存条目失效"""
+        """Invalidate specific cache entry"""
         cache_key = self._generate_key(func_name, args, kwargs)
         if cache_key in self.cache:
             del self.cache[cache_key]
@@ -128,7 +126,7 @@ class AsyncCache(Generic[T]):
 
 
 class RetryDecorator:
-    """带重试功能的装饰器"""
+    """Decorator with retry functionality"""
     
     def __init__(self, 
                  max_retries: int = 3, 
@@ -187,9 +185,9 @@ retry = RetryDecorator
 
 
 def rate_limit(calls: int, period: float = 60.0):
-    """速率限制装饰器，限制函数调用频率"""
+    """Rate limiting decorator to limit function call frequency"""
     def decorator(func):
-        # 使用列表存储最近的调用时间
+        # Use a list to store recent call times
         call_history = []
         lock = asyncio.Lock() if asyncio.iscoroutinefunction(func) else threading.RLock()
         
@@ -197,27 +195,22 @@ def rate_limit(calls: int, period: float = 60.0):
             @wraps(func)
             async def async_wrapper(*args, **kwargs):
                 async with lock:
-                    # 移除过期的调用记录
+                    # Remove expired call records
                     now = time.time()
                     while call_history and call_history[0] < now - period:
                         call_history.pop(0)
                     
-                    # 检查是否超过速率限制
+                    # Check if rate limit exceeded
                     if len(call_history) >= calls:
                         wait_time = call_history[0] + period - now
                         if wait_time > 0:
                             logger.warning(f"Rate limit exceeded for {func.__name__}, waiting {wait_time:.2f} seconds")
                             await asyncio.sleep(wait_time)
-                            
-                            # 重新检查(因为可能有其他调用)
-                            now = time.time()
-                            while call_history and call_history[0] < now - period:
-                                call_history.pop(0)
                     
-                    # 记录当前调用
+                    # Record current call
                     call_history.append(time.time())
                     
-                    # 调用原函数
+                    # Call original function
                     return await func(*args, **kwargs)
             
             return async_wrapper
@@ -225,27 +218,22 @@ def rate_limit(calls: int, period: float = 60.0):
             @wraps(func)
             def sync_wrapper(*args, **kwargs):
                 with lock:
-                    # 移除过期的调用记录
+                    # Remove expired call records
                     now = time.time()
                     while call_history and call_history[0] < now - period:
                         call_history.pop(0)
                     
-                    # 检查是否超过速率限制
+                    # Check if rate limit exceeded
                     if len(call_history) >= calls:
                         wait_time = call_history[0] + period - now
                         if wait_time > 0:
                             logger.warning(f"Rate limit exceeded for {func.__name__}, waiting {wait_time:.2f} seconds")
                             time.sleep(wait_time)
-                            
-                            # 重新检查
-                            now = time.time()
-                            while call_history and call_history[0] < now - period:
-                                call_history.pop(0)
                     
-                    # 记录当前调用
+                    # Record current call
                     call_history.append(time.time())
                     
-                    # 调用原函数
+                    # Call original function
                     return func(*args, **kwargs)
                     
             return sync_wrapper
@@ -254,7 +242,7 @@ def rate_limit(calls: int, period: float = 60.0):
 
 
 def timing_decorator(func):
-    """测量函数执行时间的装饰器"""
+    """Decorator to measure function execution time"""
     if asyncio.iscoroutinefunction(func):
         @wraps(func)
         async def async_wrapper(*args, **kwargs):
@@ -286,23 +274,23 @@ def timing_decorator(func):
 
 
 def memoize(ttl: float = None):
-    """记忆化装饰器，缓存函数结果"""
+    """Memoization decorator to cache function results"""
     cache = {}
     expire_times = {}
     
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            # 生成缓存键
+            # Generate cache key
             key = str((args, frozenset(kwargs.items())))
             
-            # 检查缓存是否过期
+            # Check if cache expired
             if ttl is not None and key in expire_times:
                 if time.time() > expire_times[key]:
                     if key in cache:
                         del cache[key]
             
-            # 如果未命中缓存，计算结果并存储
+            # If cache miss, compute result and store
             if key not in cache:
                 result = func(*args, **kwargs)
                 cache[key] = result
@@ -310,10 +298,10 @@ def memoize(ttl: float = None):
                     expire_times[key] = time.time() + ttl
                 return result
             
-            # 返回缓存结果
+            # Return cached result
             return cache[key]
         
-        # 添加清除缓存的方法
+        # Add method to clear cache
         wrapper.clear_cache = lambda: cache.clear()
         
         return wrapper
@@ -322,7 +310,7 @@ def memoize(ttl: float = None):
 
 
 def safe_json_dumps(obj: Any, default: Any = None, **kwargs) -> str:
-    """安全的JSON序列化，处理不可序列化的对象"""
+    """Safe JSON serialization, handling non-serializable objects"""
     def json_serializer(o):
         if isinstance(o, (datetime, )):
             return o.isoformat()
@@ -338,30 +326,30 @@ def safe_json_dumps(obj: Any, default: Any = None, **kwargs) -> str:
         return json.dumps(obj, default=json_serializer, **kwargs)
     except Exception as e:
         logger.error(f"JSON serialization error: {e}")
-        return json.dumps({"error": "序列化失败", "type": str(type(obj))})
+        return json.dumps({"error": "Serialization failed", "type": str(type(obj))})
 
 
 def generate_id(prefix: str = "") -> str:
-    """生成唯一标识符"""
+    """Generate unique identifier"""
     random_id = uuid.uuid4().hex[:12]
     timestamp = int(time.time())
     return f"{prefix}{timestamp:x}_{random_id}"
 
 
 async def run_with_timeout(coro, timeout: float = 5.0, default=None):
-    """带超时的异步函数执行器"""
+    """Async function executor with timeout"""
     try:
         return await asyncio.wait_for(coro, timeout=timeout)
     except asyncio.TimeoutError:
-        logger.warning(f"操作超时 ({timeout}s)")
+        logger.warning(f"Operation timed out ({timeout}s)")
         return default
     except Exception as e:
-        logger.error(f"运行异步函数时出错: {e}")
+        logger.error(f"Error running async function: {e}")
         return default
 
 
 def load_json_file(file_path: str, default: Dict = None) -> Dict:
-    """安全加载JSON文件"""
+    """Safely load JSON file"""
     try:
         if not os.path.exists(file_path):
             return default or {}
@@ -369,12 +357,12 @@ def load_json_file(file_path: str, default: Dict = None) -> Dict:
         with open(file_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception as e:
-        logger.error(f"加载 JSON 文件 {file_path} 失败: {e}")
+        logger.error(f"Failed to load JSON file {file_path}: {e}")
         return default or {}
 
 
 def save_json_file(file_path: str, data: Any, indent: int = 2) -> bool:
-    """安全保存JSON文件"""
+    """Safely save JSON file"""
     try:
         directory = os.path.dirname(file_path)
         if directory and not os.path.exists(directory):
@@ -384,12 +372,12 @@ def save_json_file(file_path: str, data: Any, indent: int = 2) -> bool:
             json.dump(data, f, ensure_ascii=False, indent=indent)
         return True
     except Exception as e:
-        logger.error(f"保存 JSON 文件 {file_path} 失败: {e}")
+        logger.error(f"Failed to save JSON file {file_path}: {e}")
         return False
 
 
 class LimitedSizeDict(dict):
-    """固定大小的字典，当超过大小限制时自动删除最早添加的条目"""
+    """Fixed size dictionary that automatically removes oldest entries when size limit is exceeded"""
     
     def __init__(self, max_size=1000, *args, **kwargs):
         self.max_size = max_size
@@ -416,7 +404,7 @@ class LimitedSizeDict(dict):
 
 
 class SafeDict:
-    """线程安全的字典"""
+    """Thread-safe dictionary"""
     
     def __init__(self, *args, **kwargs):
         self._dict = dict(*args, **kwargs)
@@ -476,7 +464,7 @@ class SafeDict:
 
 
 class AsyncTaskManager:
-    """异步任务管理器，用于跟踪和控制异步任务"""
+    """Asynchronous task manager for tracking and controlling async tasks"""
     
     def __init__(self):
         self.tasks = {}
@@ -484,11 +472,11 @@ class AsyncTaskManager:
         self._lock = asyncio.Lock()
         
     async def create_task(self, name: str, coro, timeout: float = None) -> str:
-        """创建并注册一个任务"""
+        """Create and register a task"""
         async with self._lock:
             task_id = str(uuid.uuid4())
             
-            # 创建包装器协程
+            # Create wrapper coroutine
             async def task_wrapper():
                 try:
                     if timeout:
@@ -496,7 +484,7 @@ class AsyncTaskManager:
                     else:
                         result = await coro
                         
-                    # 存储结果
+                    # Store result
                     async with self._lock:
                         self.results[task_id] = {
                             "success": True,
@@ -505,7 +493,7 @@ class AsyncTaskManager:
                         }
                         
                 except asyncio.CancelledError:
-                    # 任务被取消
+                    # Task cancelled
                     async with self._lock:
                         self.results[task_id] = {
                             "success": False,
@@ -515,7 +503,7 @@ class AsyncTaskManager:
                     raise
                     
                 except Exception as e:
-                    # 任务出错
+                    # Task error
                     async with self._lock:
                         self.results[task_id] = {
                             "success": False,
@@ -524,12 +512,12 @@ class AsyncTaskManager:
                             "time": time.time()
                         }
                 finally:
-                    # 完成时从活动任务中移除
+                    # Remove from active tasks when done
                     async with self._lock:
                         if task_id in self.tasks:
                             del self.tasks[task_id]
             
-            # 创建并启动任务
+            # Create and start task
             task = asyncio.create_task(task_wrapper(), name=name)
             self.tasks[task_id] = {
                 "task": task,
@@ -540,7 +528,7 @@ class AsyncTaskManager:
             return task_id
             
     async def cancel_task(self, task_id: str) -> bool:
-        """取消任务"""
+        """Cancel task"""
         async with self._lock:
             if task_id in self.tasks:
                 task_info = self.tasks[task_id]
@@ -550,11 +538,11 @@ class AsyncTaskManager:
             return False
     
     async def get_task_info(self, task_id: str) -> Optional[Dict[str, Any]]:
-        """获取任务信息"""
+        """Get task information"""
         async with self._lock:
             task_info = self.tasks.get(task_id)
             if not task_info:
-                # 检查是否有结果
+                # Check if there are results
                 result = self.results.get(task_id)
                 if result:
                     return {
@@ -577,10 +565,10 @@ class AsyncTaskManager:
             }
     
     async def get_all_tasks(self) -> Dict[str, Dict[str, Any]]:
-        """获取所有任务信息"""
+        """Get information about all tasks"""
         async with self._lock:
             all_tasks = {}
-            # 活动任务
+            # Active tasks
             for task_id, task_info in self.tasks.items():
                 task = task_info["task"]
                 all_tasks[task_id] = {
@@ -593,7 +581,7 @@ class AsyncTaskManager:
                     "active": True
                 }
             
-            # 已完成任务
+            # Completed tasks
             for task_id, result in self.results.items():
                 if task_id not in all_tasks:
                     all_tasks[task_id] = {
@@ -607,7 +595,7 @@ class AsyncTaskManager:
             return all_tasks
             
     async def cleanup_old_results(self, max_age: float = 3600) -> int:
-        """清理旧的任务结果"""
+        """Clean up old task results"""
         async with self._lock:
             now = time.time()
             old_tasks = [
@@ -622,7 +610,7 @@ class AsyncTaskManager:
             
 
 class Signal:
-    """简单的信号/槽实现，用于解耦组件"""
+    """Simple signal/slot implementation for decoupling components"""
     
     def __init__(self, name=None):
         self.name = name
@@ -630,21 +618,21 @@ class Signal:
         self._lock = threading.RLock()
     
     def connect(self, handler):
-        """连接处理器"""
+        """Connect handler"""
         with self._lock:
             if handler not in self._handlers:
                 self._handlers.append(handler)
         return self
     
     def disconnect(self, handler):
-        """断开处理器"""
+        """Disconnect handler"""
         with self._lock:
             if handler in self._handlers:
                 self._handlers.remove(handler)
         return self
     
     def emit(self, *args, **kwargs):
-        """同步发射信号"""
+        """Emit signal synchronously"""
         with self._lock:
             handlers = list(self._handlers)
             
@@ -658,7 +646,7 @@ class Signal:
         return results
     
     async def emit_async(self, *args, **kwargs):
-        """异步发射信号"""
+        """Emit signal asynchronously"""
         with self._lock:
             handlers = list(self._handlers)
             
@@ -667,7 +655,7 @@ class Signal:
             if asyncio.iscoroutinefunction(handler):
                 tasks.append(handler(*args, **kwargs))
             else:
-                # 将同步处理器包装为异步
+                # Wrap synchronous handlers as async
                 def make_wrapper(h):
                     async def wrapper():
                         return h(*args, **kwargs)
@@ -679,13 +667,13 @@ class Signal:
         return []
     
     def clear(self):
-        """清除所有处理器"""
+        """Clear all handlers"""
         with self._lock:
             self._handlers.clear()
 
 
 def singleton(cls):
-    """单例装饰器"""
+    """Singleton decorator"""
     instances = {}
     
     @wraps(cls)
@@ -698,7 +686,7 @@ def singleton(cls):
 
 
 def debounce(wait_time):
-    """防抖装饰器，限制函数调用频率"""
+    """Debounce decorator to limit function call frequency"""
     def decorator(func):
         last_called = [0]
         tasks = {}
@@ -741,12 +729,11 @@ def debounce(wait_time):
 
 
 def profile_memory(func):
-    """内存分析装饰器"""
+    """Memory profiling decorator"""
     @wraps(func)
     def wrapper(*args, **kwargs):
         try:
             import psutil
-            import os
             process = psutil.Process(os.getpid())
             mem_before = process.memory_info().rss / (1024 * 1024)  # MB
             
@@ -768,7 +755,7 @@ def profile_memory(func):
 
 
 def auto_retry(max_retries=3, exceptions=(Exception,), retry_delay=1.0, backoff_factor=2.0):
-    """自动重试装饰器"""
+    """Auto retry decorator"""
     return RetryDecorator(
         max_retries=max_retries, 
         retry_delay=retry_delay, 

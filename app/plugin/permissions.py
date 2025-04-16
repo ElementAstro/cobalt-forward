@@ -1,5 +1,11 @@
-from typing import Set, Callable, Dict, List, Any
+"""
+Plugin permission management system.
+
+This module provides functionality for managing plugin permissions and
+implementing permission-based access control.
+"""
 from functools import wraps
+from typing import Dict, List, Set, Optional, Callable, Any, Union
 import logging
 import inspect
 import asyncio
@@ -8,170 +14,415 @@ logger = logging.getLogger(__name__)
 
 
 class PluginPermission:
-    """插件权限定义"""
-    ADMIN = "admin"
-    FILE_IO = "file_io"
-    NETWORK = "network"
-    SYSTEM = "system"
-    DATABASE = "database"
-    UI = "ui"
-    EVENT = "event"
+    """
+    Permission definition and checking class for plugin system
+    """
     
-    # 所有权限
-    ALL = {ADMIN, FILE_IO, NETWORK, SYSTEM, DATABASE, UI, EVENT}
+    # Standard permission definitions
+    READ_CONFIG = "config.read"
+    WRITE_CONFIG = "config.write"
+    READ_FILES = "files.read"
+    WRITE_FILES = "files.write"
+    EXECUTE_COMMANDS = "commands.execute"
+    NETWORK_ACCESS = "network.access"
+    PLUGIN_MANAGEMENT = "plugins.manage"
+    USER_MANAGEMENT = "users.manage"
+    SYSTEM_INFO = "system.info"
     
-    # 权限分级
-    PERMISSION_LEVELS = {
-        ADMIN: 100,
-        SYSTEM: 80,
-        DATABASE: 60,
-        NETWORK: 40,
-        FILE_IO: 30,
-        EVENT: 20,
-        UI: 10
-    }
-    
-    # 依赖关系，拥有键权限会自动获得值中的权限
-    DEPENDENCIES = {
-        ADMIN: {SYSTEM, DATABASE, NETWORK, FILE_IO, EVENT, UI},
-        SYSTEM: {DATABASE, NETWORK, FILE_IO},
-        DATABASE: {FILE_IO}
+    # Hierarchical permission structure
+    PERMISSION_HIERARCHY = {
+        "config": ["read", "write"],
+        "files": ["read", "write", "delete"],
+        "commands": ["execute"],
+        "network": ["access", "listen"],
+        "plugins": ["manage", "execute"],
+        "users": ["manage", "read"],
+        "system": ["info", "manage"],
+        "events": ["subscribe", "publish"],
     }
     
     @classmethod
-    def get_level(cls, permission: str) -> int:
-        """获取权限级别"""
-        return cls.PERMISSION_LEVELS.get(permission, 0)
-    
-    @classmethod
-    def get_implied_permissions(cls, permission: str) -> Set[str]:
-        """获取某权限隐含的所有权限"""
-        result = {permission}
-        for implied in cls.DEPENDENCIES.get(permission, set()):
-            result.add(implied)
-            result.update(cls.get_implied_permissions(implied))
+    def get_all_permissions(cls) -> List[str]:
+        """Get list of all defined permissions"""
+        result = []
+        for category, actions in cls.PERMISSION_HIERARCHY.items():
+            for action in actions:
+                result.append(f"{category}.{action}")
         return result
+    
+    @classmethod
+    def get_permission_categories(cls) -> List[str]:
+        """Get list of permission categories"""
+        return list(cls.PERMISSION_HIERARCHY.keys())
+    
+    @classmethod
+    def get_category_permissions(cls, category: str) -> List[str]:
+        """Get list of permissions in a category"""
+        if category in cls.PERMISSION_HIERARCHY:
+            return [f"{category}.{action}" for action in cls.PERMISSION_HIERARCHY[category]]
+        return []
+    
+    @staticmethod
+    def check_permission(required: str, granted: Set[str]) -> bool:
+        """
+        Check if a required permission is granted
+        
+        Args:
+            required: Required permission (can use wildcards)
+            granted: Set of granted permissions
+            
+        Returns:
+            True if permission is granted, False otherwise
+        """
+        # Direct match
+        if required in granted:
+            return True
+            
+        # Check for wildcard matches
+        if "*" in granted or "*.*" in granted:
+            return True
+            
+        # Check category wildcard (e.g., "files.*")
+        category = required.split(".")[0]
+        if f"{category}.*" in granted:
+            return True
+            
+        return False
 
 
 def require_permission(permission: str):
-    """权限检查装饰器"""
+    """
+    Decorator to require permission for a function
+    
+    Args:
+        permission: Required permission string
+        
+    Returns:
+        Decorated function
+    """
     def decorator(func):
+        # Store permission requirement on the function
+        if not hasattr(func, '_required_permissions'):
+            func._required_permissions = set()
+        
+        # Add this permission
+        func._required_permissions.add(permission)
+        
         @wraps(func)
-        async def async_wrapper(self, *args, **kwargs):
-            if not hasattr(self, '_permissions'):
-                raise AttributeError(f"Object {self.__class__.__name__} has no _permissions attribute")
-                
-            # 检查直接权限或隐含权限
-            allowed_permissions = set()
-            for perm in self._permissions:
-                allowed_permissions.add(perm)
-                allowed_permissions.update(PluginPermission.get_implied_permissions(perm))
-                
-            if permission not in allowed_permissions:
-                error_msg = f"Plugin {getattr(self, 'name', self.__class__.__name__)} lacks permission: {permission}"
-                logger.warning(error_msg)
-                raise PermissionError(error_msg)
-                
-            return await func(self, *args, **kwargs)
+        def sync_wrapper(*args, **kwargs):
+            # Permission checking happens at the plugin system level,
+            # this decorator just marks the function
+            return func(*args, **kwargs)
             
         @wraps(func)
-        def sync_wrapper(self, *args, **kwargs):
-            if not hasattr(self, '_permissions'):
-                raise AttributeError(f"Object {self.__class__.__name__} has no _permissions attribute")
-                
-            # 检查直接权限或隐含权限
-            allowed_permissions = set()
-            for perm in self._permissions:
-                allowed_permissions.add(perm)
-                allowed_permissions.update(PluginPermission.get_implied_permissions(perm))
-                
-            if permission not in allowed_permissions:
-                error_msg = f"Plugin {getattr(self, 'name', self.__class__.__name__)} lacks permission: {permission}"
-                logger.warning(error_msg)
-                raise PermissionError(error_msg)
-                
-            return func(self, *args, **kwargs)
-        
-        # 根据函数类型返回合适的包装器
+        async def async_wrapper(*args, **kwargs):
+            # Permission checking happens at the plugin system level,
+            # this decorator just marks the function
+            return await func(*args, **kwargs)
+            
+        # Choose the appropriate wrapper based on function type
         if asyncio.iscoroutinefunction(func):
             return async_wrapper
         return sync_wrapper
-    
+        
     return decorator
 
 
 class PermissionManager:
-    """权限管理器"""
+    """
+    Manager for plugin permissions
+    """
     
     def __init__(self):
+        """Initialize permission manager"""
         self._plugin_permissions: Dict[str, Set[str]] = {}
-        self._permission_log: List[Dict[str, Any]] = []
-        self._max_log_size = 1000
-    
-    def grant_permission(self, plugin_name: str, permission: str) -> bool:
-        """授予插件权限"""
-        if plugin_name not in self._plugin_permissions:
-            self._plugin_permissions[plugin_name] = set()
+        self._role_permissions: Dict[str, Set[str]] = {}
+        self._plugin_roles: Dict[str, Set[str]] = {}
+        self._default_permissions: Set[str] = set()
+        
+    def grant_permission(self, plugin_id: str, permission: str) -> None:
+        """
+        Grant permission to a plugin
+        
+        Args:
+            plugin_id: Plugin identifier
+            permission: Permission to grant
+        """
+        if plugin_id not in self._plugin_permissions:
+            self._plugin_permissions[plugin_id] = set()
+        self._plugin_permissions[plugin_id].add(permission)
+        logger.debug(f"Granted permission '{permission}' to plugin '{plugin_id}'")
+        
+    def revoke_permission(self, plugin_id: str, permission: str) -> bool:
+        """
+        Revoke permission from a plugin
+        
+        Args:
+            plugin_id: Plugin identifier
+            permission: Permission to revoke
             
-        self._plugin_permissions[plugin_name].add(permission)
-        self._log_permission_change(plugin_name, permission, "grant")
-        return True
-    
-    def revoke_permission(self, plugin_name: str, permission: str) -> bool:
-        """撤销插件权限"""
-        if plugin_name in self._plugin_permissions:
-            self._plugin_permissions[plugin_name].discard(permission)
-            self._log_permission_change(plugin_name, permission, "revoke")
+        Returns:
+            True if permission was revoked, False if it wasn't granted
+        """
+        if plugin_id in self._plugin_permissions and permission in self._plugin_permissions[plugin_id]:
+            self._plugin_permissions[plugin_id].remove(permission)
+            logger.debug(f"Revoked permission '{permission}' from plugin '{plugin_id}'")
             return True
         return False
-    
-    def has_permission(self, plugin_name: str, permission: str) -> bool:
-        """检查插件是否有特定权限"""
-        if plugin_name not in self._plugin_permissions:
-            return False
-            
-        direct_permissions = self._plugin_permissions[plugin_name]
         
-        # 检查直接权限
-        if permission in direct_permissions:
+    def has_permission(self, plugin_id: str, permission: str) -> bool:
+        """
+        Check if a plugin has a specific permission
+        
+        Args:
+            plugin_id: Plugin identifier
+            permission: Permission to check
+            
+        Returns:
+            True if plugin has permission, False otherwise
+        """
+        # Check default permissions first
+        if permission in self._default_permissions:
             return True
             
-        # 检查隐含权限
-        for perm in direct_permissions:
-            implied = PluginPermission.get_implied_permissions(perm)
-            if permission in implied:
+        # Check explicit plugin permissions
+        if plugin_id in self._plugin_permissions:
+            if PluginPermission.check_permission(permission, self._plugin_permissions[plugin_id]):
                 return True
                 
+        # Check role-based permissions
+        if plugin_id in self._plugin_roles:
+            for role in self._plugin_roles[plugin_id]:
+                if role in self._role_permissions:
+                    if PluginPermission.check_permission(permission, self._role_permissions[role]):
+                        return True
+        
         return False
-    
-    def get_plugin_permissions(self, plugin_name: str) -> Set[str]:
-        """获取插件的所有权限（包括隐含权限）"""
-        direct_permissions = self._plugin_permissions.get(plugin_name, set())
         
-        # 计算所有隐含权限
-        all_permissions = set(direct_permissions)
-        for perm in direct_permissions:
-            all_permissions.update(PluginPermission.get_implied_permissions(perm))
+    def set_plugin_roles(self, plugin_id: str, roles: List[str]) -> None:
+        """
+        Set roles for a plugin
+        
+        Args:
+            plugin_id: Plugin identifier
+            roles: List of role names
+        """
+        self._plugin_roles[plugin_id] = set(roles)
+        
+    def add_plugin_role(self, plugin_id: str, role: str) -> None:
+        """
+        Add a role to a plugin
+        
+        Args:
+            plugin_id: Plugin identifier
+            role: Role to add
+        """
+        if plugin_id not in self._plugin_roles:
+            self._plugin_roles[plugin_id] = set()
+        self._plugin_roles[plugin_id].add(role)
+        
+    def remove_plugin_role(self, plugin_id: str, role: str) -> bool:
+        """
+        Remove a role from a plugin
+        
+        Args:
+            plugin_id: Plugin identifier
+            role: Role to remove
             
-        return all_permissions
-    
-    def _log_permission_change(self, plugin_name: str, permission: str, action: str):
-        """记录权限变更"""
-        import time
+        Returns:
+            True if role was removed, False if plugin didn't have the role
+        """
+        if plugin_id in self._plugin_roles and role in self._plugin_roles[plugin_id]:
+            self._plugin_roles[plugin_id].remove(role)
+            return True
+        return False
         
-        log_entry = {
-            "timestamp": time.time(),
-            "plugin": plugin_name,
-            "permission": permission,
-            "action": action
-        }
+    def set_role_permissions(self, role: str, permissions: List[str]) -> None:
+        """
+        Set permissions for a role
         
-        self._permission_log.append(log_entry)
+        Args:
+            role: Role name
+            permissions: List of permissions to grant
+        """
+        self._role_permissions[role] = set(permissions)
         
-        # 保持日志大小
-        if len(self._permission_log) > self._max_log_size:
-            self._permission_log = self._permission_log[-self._max_log_size:]
-    
-    def get_permission_log(self) -> List[Dict[str, Any]]:
-        """获取权限变更日志"""
-        return self._permission_log
+    def add_role_permission(self, role: str, permission: str) -> None:
+        """
+        Add permission to a role
+        
+        Args:
+            role: Role name
+            permission: Permission to grant
+        """
+        if role not in self._role_permissions:
+            self._role_permissions[role] = set()
+        self._role_permissions[role].add(permission)
+        
+    def remove_role_permission(self, role: str, permission: str) -> bool:
+        """
+        Remove permission from a role
+        
+        Args:
+            role: Role name
+            permission: Permission to revoke
+            
+        Returns:
+            True if permission was removed, False if role didn't have the permission
+        """
+        if role in self._role_permissions and permission in self._role_permissions[role]:
+            self._role_permissions[role].remove(permission)
+            return True
+        return False
+        
+    def get_plugin_permissions(self, plugin_id: str) -> Set[str]:
+        """
+        Get all permissions granted to a plugin
+        
+        Args:
+            plugin_id: Plugin identifier
+            
+        Returns:
+            Set of granted permissions
+        """
+        permissions = set(self._default_permissions)
+        
+        # Add explicit plugin permissions
+        if plugin_id in self._plugin_permissions:
+            permissions.update(self._plugin_permissions[plugin_id])
+            
+        # Add permissions from roles
+        if plugin_id in self._plugin_roles:
+            for role in self._plugin_roles[plugin_id]:
+                if role in self._role_permissions:
+                    permissions.update(self._role_permissions[role])
+                    
+        return permissions
+        
+    def set_default_permissions(self, permissions: List[str]) -> None:
+        """
+        Set default permissions granted to all plugins
+        
+        Args:
+            permissions: List of default permissions
+        """
+        self._default_permissions = set(permissions)
+        
+    def add_default_permission(self, permission: str) -> None:
+        """
+        Add a default permission
+        
+        Args:
+            permission: Permission to add as default
+        """
+        self._default_permissions.add(permission)
+        
+    def remove_default_permission(self, permission: str) -> bool:
+        """
+        Remove a default permission
+        
+        Args:
+            permission: Permission to remove
+            
+        Returns:
+            True if permission was removed, False if it wasn't a default permission
+        """
+        if permission in self._default_permissions:
+            self._default_permissions.remove(permission)
+            return True
+        return False
+        
+    def clear_plugin_permissions(self, plugin_id: str) -> None:
+        """
+        Clear all permissions for a plugin
+        
+        Args:
+            plugin_id: Plugin identifier
+        """
+        if plugin_id in self._plugin_permissions:
+            del self._plugin_permissions[plugin_id]
+            
+        if plugin_id in self._plugin_roles:
+            del self._plugin_roles[plugin_id]
+        
+    def check_function_permissions(self, plugin_id: str, func: Callable) -> bool:
+        """
+        Check if plugin has all permissions required by a function
+        
+        Args:
+            plugin_id: Plugin identifier
+            func: Function to check
+            
+        Returns:
+            True if all required permissions are granted, False otherwise
+        """
+        # Get required permissions
+        required_permissions = getattr(func, '_required_permissions', set())
+        
+        # No permissions required
+        if not required_permissions:
+            return True
+            
+        # Check each required permission
+        for permission in required_permissions:
+            if not self.has_permission(plugin_id, permission):
+                logger.warning(
+                    f"Plugin '{plugin_id}' lacks required permission '{permission}' "
+                    f"for function '{func.__name__}'"
+                )
+                return False
+                
+        return True
+        
+    def get_missing_permissions(self, plugin_id: str, func: Callable) -> List[str]:
+        """
+        Get list of missing permissions a plugin needs for a function
+        
+        Args:
+            plugin_id: Plugin identifier
+            func: Function to check
+            
+        Returns:
+            List of missing permissions
+        """
+        # Get required permissions
+        required_permissions = getattr(func, '_required_permissions', set())
+        
+        # If no permissions required, return empty list
+        if not required_permissions:
+            return []
+            
+        # Check each permission and collect missing ones
+        missing = []
+        for permission in required_permissions:
+            if not self.has_permission(plugin_id, permission):
+                missing.append(permission)
+                
+        return missing
+        
+    def get_roles(self) -> List[str]:
+        """
+        Get all defined roles
+        
+        Returns:
+            List of role names
+        """
+        return list(self._role_permissions.keys())
+        
+    def get_role_permissions_dict(self) -> Dict[str, List[str]]:
+        """
+        Get dictionary mapping roles to their permissions
+        
+        Returns:
+            Dictionary mapping role names to lists of permissions
+        """
+        return {role: list(perms) for role, perms in self._role_permissions.items()}
+        
+    def get_plugin_roles_dict(self) -> Dict[str, List[str]]:
+        """
+        Get dictionary mapping plugins to their roles
+        
+        Returns:
+            Dictionary mapping plugin IDs to lists of roles
+        """
+        return {plugin_id: list(roles) for plugin_id, roles in self._plugin_roles.items()}
