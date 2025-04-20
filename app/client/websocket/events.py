@@ -5,10 +5,10 @@ from loguru import logger
 
 
 class EventManager:
-    """事件管理器"""
+    """Event Manager for WebSocket Communications"""
 
     def __init__(self):
-        # 使用集合而非列表，避免重复回调
+        # Using sets instead of lists to avoid duplicate callbacks
         self._callbacks: Dict[str, Set[Callable]] = {
             'connect': set(),
             'disconnect': set(),
@@ -22,7 +22,15 @@ class EventManager:
 
     @asynccontextmanager
     async def event_context(self, event: str, callback: Callable) -> AsyncGenerator[None, None]:
-        """事件回调的上下文管理器"""
+        """Context manager for event callbacks.
+        
+        Args:
+            event: Event name
+            callback: Callback function to be executed when event is triggered
+            
+        Yields:
+            None
+        """
         self.add_callback(event, callback)
         try:
             yield
@@ -30,7 +38,15 @@ class EventManager:
             self.remove_callback(event, callback)
 
     def add_callback(self, event: str, callback: Callable) -> bool:
-        """添加事件回调"""
+        """Add event callback.
+        
+        Args:
+            event: Event name
+            callback: Callback function
+            
+        Returns:
+            True if callback was added, False otherwise
+        """
         if event in self._callbacks:
             if callback not in self._callbacks[event]:
                 self._callbacks[event].add(callback)
@@ -39,7 +55,15 @@ class EventManager:
         return False
 
     def remove_callback(self, event: str, callback: Callable) -> bool:
-        """移除事件回调"""
+        """Remove event callback.
+        
+        Args:
+            event: Event name
+            callback: Callback function to remove
+            
+        Returns:
+            True if callback was removed, False otherwise
+        """
         if event in self._callbacks and callback in self._callbacks[event]:
             self._callbacks[event].remove(callback)
             logger.debug(f"Removed callback for event: {event}")
@@ -47,7 +71,13 @@ class EventManager:
         return False
 
     async def trigger(self, event: str, *args, **kwargs) -> None:
-        """优化的事件触发器"""
+        """Optimized event trigger.
+        
+        Args:
+            event: Event name to trigger
+            *args: Arguments to pass to callbacks
+            **kwargs: Keyword arguments to pass to callbacks
+        """
         callbacks = list(self._callbacks.get(event, set()))
         if not callbacks:
             logger.trace(f"No callbacks for event: {event}")
@@ -69,7 +99,16 @@ class EventManager:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _safe_callback(self, callback, *args, **kwargs):
-        """安全地执行异步回调"""
+        """Safely execute async callback.
+        
+        Args:
+            callback: Async function to execute
+            *args: Arguments to pass to callback
+            **kwargs: Keyword arguments to pass to callback
+            
+        Returns:
+            Callback result or None if exception occurred
+        """
         try:
             return await callback(*args, **kwargs)
         except Exception as e:
@@ -77,7 +116,16 @@ class EventManager:
             return None
 
     def _safe_sync_callback(self, callback, args, kwargs):
-        """安全地执行同步回调"""
+        """Safely execute synchronous callback.
+        
+        Args:
+            callback: Synchronous function to execute
+            args: Arguments to pass to callback
+            kwargs: Keyword arguments to pass to callback
+            
+        Returns:
+            Callback result or None if exception occurred
+        """
         try:
             return callback(*args, **kwargs)
         except Exception as e:

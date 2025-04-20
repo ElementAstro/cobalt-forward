@@ -1,6 +1,6 @@
 from ..base import BaseClient, BaseConfig
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, AsyncGenerator, Dict, List, Union
+from typing import Any, Callable, Optional, AsyncGenerator, Dict, List, Union, Type
 import asyncio
 from contextlib import asynccontextmanager, suppress
 from loguru import logger
@@ -11,11 +11,12 @@ from .events import EventManager
 from .connection import ConnectionManager
 from .config import WebSocketConfig as WSConfig
 from .utils import parse_message, serialize_message
+from .plugin import PluginManager, WebSocketPlugin
 
 
 @dataclass
 class WebSocketConfig(BaseConfig):
-    """WebSocket客户端配置"""
+    """WebSocket Client Configuration"""
     receive_timeout: Optional[float] = None
     max_reconnect_attempts: int = -1
     reconnect_interval: float = 5.0
@@ -27,7 +28,7 @@ class WebSocketConfig(BaseConfig):
     max_message_size: int = 2**20  # 1MB
 
     def to_connection_config(self) -> WSConfig:
-        """转换为连接配置"""
+        """Convert to connection configuration"""
         return WSConfig(
             uri=self.url,
             ssl_context=self.ssl_context,
@@ -48,7 +49,11 @@ class WebSocketConfig(BaseConfig):
 
 
 class WebSocketClient(BaseClient):
-    """增强的WebSocket客户端实现"""
+    """Enhanced WebSocket Client Implementation
+    
+    Provides robust WebSocket communication with automatic reconnection,
+    event handling, message streaming, and session management.
+    """
 
     def __init__(self, config: WebSocketConfig):
         super().__init__(config)
@@ -59,19 +64,46 @@ class WebSocketClient(BaseClient):
         self._stream_tasks = set()
         self._last_activity = time.time()
         self._reconnect_backoff = 1.0
+        # Initialize plugin manager
+        self.plugin_manager = PluginManager()
+        
+        # Connect event handlers
+        self.event_manager.add_callback('connect', self._on_connect)
+        self.event_manager.add_callback('disconnect', self._on_disconnect)
+        self.event_manager.add_callback('error', self._on_error)
 
     def add_callback(self, event: str, callback: Callable) -> bool:
-        """注册事件回调"""
+        """Register event callback
+        
+        Args:
+            event: Event name to listen for
+            callback: Function to execute when event occurs
+            
+        Returns:
+            bool: True if successfully registered, False otherwise
+        """
         return self.event_manager.add_callback(event, callback)
 
     def remove_callback(self, event: str, callback: Callable) -> bool:
-        """移除事件回调"""
+        """Remove event callback
+        
+        Args:
+            event: Event name
+            callback: Function to remove
+            
+        Returns:
+            bool: True if successfully removed, False otherwise
+        """
         return self.event_manager.remove_callback(event, callback)
 
     async def connect(self) -> bool:
-        """实现WebSocket连接"""
+        """Establish WebSocket connection
+        
+        Returns:
+            bool: True if successfully connected, False otherwise
+        """
         try:
-            # 添加消息处理回调
+            # Register message handling callback
             self.add_callback('message', self._queue_message)
 
             success = await self.connection_manager.connect()
@@ -79,7 +111,7 @@ class WebSocketClient(BaseClient):
 
             if success:
                 self._last_activity = time.time()
-                self._reconnect_backoff = 1.0  # 重置退避时间
+                self._reconnect_backoff = 1.0  # Reset backoff time
 
             return success
         except Exception as e:
@@ -87,14 +119,66 @@ class WebSocketClient(BaseClient):
                 f"WebSocket connection failed: {type(e).__name__}: {str(e)}")
             return False
 
+    def register_plugin(self, plugin_class: Type[WebSocketPlugin]) -> bool:
+        """Register a WebSocket plugin
+        
+        Args:
+            plugin_class: Plugin class to register
+            
+        Returns:
+            bool: True if plugin was successfully registered
+        """
+        return self.plugin_manager.register(plugin_class)
+    
+    def unregister_plugin(self, plugin_name: str) -> bool:
+        """Unregister a WebSocket plugin
+        
+        Args:
+            plugin_name: Name of the plugin to unregister
+            
+        Returns:
+            bool: True if plugin was successfully unregistered
+        """
+        return self.plugin_manager.unregister(plugin_name)
+    
+    async def _on_connect(self) -> None:
+        """Internal connect event handler"""
+        await self.plugin_manager.initialize(self)
+        await self.plugin_manager.on_connect()
+    
+    async def _on_disconnect(self) -> None:
+        """Internal disconnect event handler"""
+        await self.plugin_manager.on_disconnect()
+    
+    async def _on_error(self, error: Exception) -> None:
+        """Internal error event handler
+        
+        Args:
+            error: Exception that occurred
+        """
+        await self.plugin_manager.on_error(error)
+    
     async def send_message(self, message: Any) -> bool:
-        """发送消息"""
+        """Send message through WebSocket
+        
+        Args:
+            message: Message to send (will be serialized)
+            
+        Returns:
+            bool: True if message was sent successfully, False otherwise
+        """
         if not self.connection_manager.connected:
             logger.error("No active connection for sending")
             return False
 
         try:
-            serialized_message = serialize_message(message)
+            # Process message through plugin chain
+            processed_message = await self.plugin_manager.pre_send_chain(message)
+            if processed_message is None:
+                logger.debug("Message sending cancelled by plugin")
+                return False
+                
+            serialized_message = serialize_message(processed_message)
             await self.connection_manager.connection.send(serialized_message)
             self._last_activity = time.time()
             logger.debug(f"Sent message: {serialized_message[:100]}...")
@@ -109,9 +193,13 @@ class WebSocketClient(BaseClient):
                 f"Failed to send message: {type(e).__name__}: {str(e)}")
             await self.event_manager.trigger('error', e)
             return False
-
+    
     async def receive_message(self) -> Optional[Any]:
-        """接收消息"""
+        """Receive message from WebSocket
+        
+        Returns:
+            Any: Parsed message or None if error occurred
+        """
         if not self.connection_manager.connected:
             logger.error("No active connection for receiving")
             return None
@@ -127,8 +215,15 @@ class WebSocketClient(BaseClient):
 
             self._last_activity = time.time()
             parsed_message = parse_message(message)
-            await self.event_manager.trigger('message', parsed_message)
-            return parsed_message
+            
+            # Process message through plugin chain
+            processed_message = await self.plugin_manager.post_receive_chain(parsed_message)
+            if processed_message is None:
+                logger.debug("Message processing cancelled by plugin")
+                return None
+                
+            await self.event_manager.trigger('message', processed_message)
+            return processed_message
 
         except asyncio.TimeoutError:
             logger.debug("Receive timeout")
@@ -144,38 +239,52 @@ class WebSocketClient(BaseClient):
             return None
 
     async def _handle_connection_error(self):
-        """处理连接错误"""
+        """Handle connection errors
+        
+        Marks the connection as disconnected. Connection manager
+        will handle reconnection logic.
+        """
         if not self.connection_manager.connected:
             return
 
-        # 标记为已断开，触发重连
+        # Mark as disconnected, trigger reconnection
         self.connected = False
-        # 连接管理器会处理重连逻辑
+        # Connection manager handles reconnection logic
 
     async def _queue_message(self, message):
-        """将消息添加到队列"""
+        """Add message to the internal queue
+        
+        Args:
+            message: Message to queue
+        """
         await self._message_queue.put(message)
 
     async def disconnect(self) -> None:
-        """实现WebSocket断开连接"""
-        # 清理所有流任务
+        """Disconnect from WebSocket server
+        
+        Cleans up all resources and closes the connection gracefully.
+        """
+        # Clean up all streaming tasks
         for task in list(self._stream_tasks):
             if not task.done():
                 task.cancel()
 
-        # 等待任务完成
+        # Wait for tasks to complete
         if self._stream_tasks:
             with suppress(asyncio.TimeoutError):
                 await asyncio.wait([t for t in self._stream_tasks], timeout=1.0)
 
-        # 移除消息回调
+        # Remove message callback
         self.remove_callback('message', self._queue_message)
 
-        # 关闭连接
+        # Shutdown plugins
+        await self.plugin_manager.shutdown()
+
+        # Close connection
         await self.connection_manager.close()
         self.connected = False
 
-        # 清空消息队列
+        # Clear message queue
         while not self._message_queue.empty():
             try:
                 self._message_queue.get_nowait()
@@ -184,23 +293,47 @@ class WebSocketClient(BaseClient):
                 break
 
     async def send(self, data: Any) -> bool:
-        """实现WebSocket消息发送"""
+        """Implement WebSocket message sending
+        
+        Overrides BaseClient.send with automatic retry
+        
+        Args:
+            data: Data to send
+            
+        Returns:
+            bool: True if message was sent successfully, False otherwise
+        """
         return await self.execute_with_retry(self.send_message, data)
 
     async def receive(self) -> Optional[Any]:
-        """实现WebSocket消息接收"""
-        # 尝试从队列获取，队列为空则直接接收
+        """Implement WebSocket message receiving
+        
+        Overrides BaseClient.receive with automatic retry and queue support
+        
+        Returns:
+            Any: Received message or None if error occurred
+        """
+        # Try to get from queue first, if empty then receive directly
         try:
             return await asyncio.wait_for(self._message_queue.get(), timeout=0.01)
         except (asyncio.TimeoutError, asyncio.QueueEmpty):
             return await self.execute_with_retry(self.receive_message)
 
     async def execute_with_retry(self, func, *args, **kwargs):
-        """带重试的执行函数"""
-        max_retries = 2  # 最大重试次数
+        """Execute function with automatic retry
+        
+        Args:
+            func: Function to execute
+            *args: Arguments to pass to function
+            **kwargs: Keyword arguments to pass to function
+            
+        Returns:
+            Any: Function result or None/False if all retries failed
+        """
+        max_retries = 2  # Maximum retry attempts
         for i in range(max_retries + 1):
             if not self.connection_manager.connected and i > 0:
-                # 重新连接
+                # Reconnect if not connected
                 await self.connect()
 
             if self.connection_manager.connected:
@@ -209,13 +342,20 @@ class WebSocketClient(BaseClient):
                     return result
 
             if i < max_retries:
-                await asyncio.sleep(0.5 * (i + 1))  # 渐进式退避
+                await asyncio.sleep(0.5 * (i + 1))  # Progressive backoff
 
         return None if func == self.receive_message else False
 
     @asynccontextmanager
     async def session(self):
-        """客户端会话上下文管理器"""
+        """Client session context manager
+        
+        Creates a context where the connection is guaranteed to be established
+        and properly closed when exiting the context.
+        
+        Yields:
+            WebSocketClient: Self reference
+        """
         try:
             await self.connect()
             yield self
@@ -223,7 +363,13 @@ class WebSocketClient(BaseClient):
             await self.disconnect()
 
     async def receive_stream(self) -> AsyncGenerator[Any, None]:
-        """消息流接收器"""
+        """Message stream receiver
+        
+        Creates an asynchronous generator for continuous message receiving.
+        
+        Yields:
+            Any: Received messages
+        """
         task = asyncio.current_task()
         if task:
             self._stream_tasks.add(task)
@@ -234,14 +380,17 @@ class WebSocketClient(BaseClient):
                 if message is not None:
                     yield message
                 else:
-                    # 如果没有消息，短暂暂停以避免CPU占用
+                    # Small pause to prevent CPU hogging if no messages
                     await asyncio.sleep(0.01)
         finally:
             if task:
                 self._stream_tasks.discard(task)
 
     async def run_forever(self):
-        """改进的永久运行模式"""
+        """Enhanced perpetual operation mode
+        
+        Continuously runs the client, handling reconnections automatically.
+        """
         while True:
             if not self.connection_manager.connected:
                 success = await self.connect()
@@ -250,10 +399,10 @@ class WebSocketClient(BaseClient):
                     continue
 
             try:
-                # 使用自定义消息处理
+                # Use custom message handling
                 async for message in self.receive_stream():
-                    # 消息已经在receive_stream中处理
-                    await asyncio.sleep(0)  # 让出控制权
+                    # Message is already processed in receive_stream
+                    await asyncio.sleep(0)  # Yield control
 
             except asyncio.CancelledError:
                 logger.info("Run forever cancelled")
@@ -262,5 +411,5 @@ class WebSocketClient(BaseClient):
                 logger.error(
                     f"Error in message stream: {type(e).__name__}: {str(e)}")
                 await self.event_manager.trigger('error', e)
-                # 短暂暂停后继续
+                # Brief pause before continuing
                 await asyncio.sleep(1.0)

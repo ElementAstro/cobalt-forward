@@ -5,19 +5,20 @@ from ..base import BaseConfig
 
 @dataclass
 class TCPSocketOptions:
-    """TCP套接字选项配置"""
-    nodelay: bool = True                # 禁用Nagle算法
-    keepalive: bool = True              # 开启TCP保活机制
-    keepalive_idle: int = 60            # 空闲多久后发送保活探测
-    keepalive_interval: int = 10        # 保活探测间隔
-    keepalive_count: int = 5            # 无响应重试次数
-    reuseaddr: bool = True              # 允许端口复用
-    recvbuf_size: int = 262144          # 接收缓冲区大小（256KB）
-    sendbuf_size: int = 262144          # 发送缓冲区大小（256KB）
-    linger: Optional[int] = None        # 延迟关闭
-    defer_accept: bool = True           # 延迟接收连接
+    """TCP socket options configuration"""
+    nodelay: bool = True                # Disable Nagle's algorithm
+    keepalive: bool = True              # Enable TCP keepalive mechanism
+    keepalive_idle: int = 60            # Seconds idle before sending keepalive probes
+    keepalive_interval: int = 10        # Interval between keepalive probes
+    keepalive_count: int = 5            # Number of unacknowledged probes before failing
+    reuseaddr: bool = True              # Allow port reuse
+    recvbuf_size: int = 262144          # Receive buffer size (256KB)
+    sendbuf_size: int = 262144          # Send buffer size (256KB)
+    linger: Optional[int] = None        # Delayed closing
+    defer_accept: bool = True           # Delay accepting connections
 
     def to_dict(self) -> Dict[str, Any]:
+        """Convert socket options to dictionary"""
         return {
             "nodelay": self.nodelay,
             "keepalive": self.keepalive,
@@ -34,60 +35,71 @@ class TCPSocketOptions:
 
 @dataclass
 class RetryPolicy:
-    """重试策略配置"""
-    max_retries: int = 5                # 最大重试次数
-    base_delay: float = 1.0             # 基础延迟（秒）
-    max_delay: float = 30.0             # 最大延迟（秒）
-    jitter: float = 0.1                 # 抖动因子（0-1）
-    backoff_factor: float = 2.0         # 退避因子
+    """Retry policy configuration"""
+    max_retries: int = 5                # Maximum retry attempts
+    base_delay: float = 1.0             # Base delay (seconds)
+    max_delay: float = 30.0             # Maximum delay (seconds)
+    jitter: float = 0.1                 # Jitter factor (0-1)
+    backoff_factor: float = 2.0         # Backoff factor
 
     def get_retry_delay(self, attempt: int) -> float:
-        """计算第n次尝试的延迟时间，使用指数退避算法"""
+        """Calculate delay for the nth attempt using exponential backoff
+        
+        Args:
+            attempt: Attempt number (0-based)
+            
+        Returns:
+            Delay in seconds
+        """
         import random
-        # 计算指数退避延迟
+        # Calculate exponential backoff delay
         delay = min(self.max_delay, self.base_delay *
                     (self.backoff_factor ** attempt))
-        # 添加随机抖动
+        # Add random jitter
         max_jitter = delay * self.jitter
         delay += random.uniform(-max_jitter, max_jitter)
-        return max(0.1, delay)  # 最小延迟100ms
+        return max(0.1, delay)  # Minimum delay 100ms
 
 
 @dataclass
 class ClientConfig(BaseConfig):
-    """TCP客户端配置"""
-    # 基本设置
+    """TCP client configuration"""
+    # Basic settings
     host: str = "localhost"
     port: int = 8080
     timeout: float = 10.0
 
-    # 缓冲区设置
-    read_buffer_size: int = 65536       # 读缓冲区大小（64KB）
-    write_buffer_size: int = 65536      # 写缓冲区大小（64KB）
-    write_batch_size: int = 8192        # 批量写入大小（8KB）
+    # Buffer settings
+    read_buffer_size: int = 65536       # Read buffer size (64KB)
+    write_buffer_size: int = 65536      # Write buffer size (64KB)
+    write_batch_size: int = 8192        # Batch write size (8KB)
 
-    # 连接设置
-    max_connections: int = 5            # 连接池大小
-    connection_timeout: float = 5.0     # 连接超时时间
+    # Connection settings
+    max_connections: int = 5            # Connection pool size
+    connection_timeout: float = 5.0     # Connection timeout
 
-    # 重试设置
+    # Retry settings
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
 
-    # 套接字选项
+    # Socket options
     socket_options: TCPSocketOptions = field(default_factory=TCPSocketOptions)
 
-    # 心跳设置
-    heartbeat_interval: float = 30.0    # 心跳间隔（秒）
-    heartbeat_timeout: float = 5.0      # 心跳超时时间
+    # Heartbeat settings
+    heartbeat_interval: float = 30.0    # Heartbeat interval (seconds)
+    heartbeat_timeout: float = 5.0      # Heartbeat timeout
 
-    # 高级设置
-    compression_enabled: bool = False   # 是否启用压缩
-    compression_level: int = 6          # 压缩级别 (0-9)
-    use_tls: bool = False               # 是否使用TLS加密
-    tls_verify: bool = True             # 是否验证TLS证书
+    # Advanced settings
+    compression_enabled: bool = False   # Enable compression
+    compression_level: int = 6          # Compression level (0-9)
+    use_tls: bool = False               # Use TLS encryption
+    tls_verify: bool = True             # Verify TLS certificates
+    
+    # Performance monitoring
+    enable_metrics: bool = True         # Enable performance metrics collection
+    metrics_interval: float = 60.0      # Metrics collection interval (seconds)
 
     def to_dict(self) -> Dict[str, Any]:
-        """将配置转换为字典"""
+        """Convert configuration to dictionary"""
         base_dict = {
             "host": self.host,
             "port": self.port,
@@ -103,6 +115,38 @@ class ClientConfig(BaseConfig):
             "compression_level": self.compression_level,
             "use_tls": self.use_tls,
             "tls_verify": self.tls_verify,
-            "socket_options": self.socket_options.to_dict()
+            "enable_metrics": self.enable_metrics,
+            "metrics_interval": self.metrics_interval,
+            "socket_options": self.socket_options.to_dict(),
+            "retry_policy": {
+                "max_retries": self.retry_policy.max_retries,
+                "base_delay": self.retry_policy.base_delay,
+                "max_delay": self.retry_policy.max_delay,
+                "jitter": self.retry_policy.jitter,
+                "backoff_factor": self.retry_policy.backoff_factor
+            }
         }
         return base_dict
+    
+    def validate(self) -> bool:
+        """Validate configuration
+        
+        Returns:
+            True if configuration is valid
+            
+        Raises:
+            ValueError: If configuration is invalid
+        """
+        if self.port <= 0 or self.port > 65535:
+            raise ValueError(f"Invalid port: {self.port}")
+            
+        if self.timeout <= 0:
+            raise ValueError(f"Invalid timeout: {self.timeout}")
+            
+        if self.heartbeat_interval <= 0:
+            raise ValueError(f"Invalid heartbeat interval: {self.heartbeat_interval}")
+            
+        if self.compression_level < 0 or self.compression_level > 9:
+            raise ValueError(f"Invalid compression level: {self.compression_level}")
+            
+        return True

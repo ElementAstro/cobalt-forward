@@ -10,41 +10,65 @@ import secrets
 
 
 class ConfigCrypto:
+    """
+    Handles encryption and decryption of configuration data.
+    Provides key management and secure storage capabilities.
+    """
     def __init__(self, key_file: Path):
+        """
+        Initialize the crypto service with a key file path.
+        
+        Args:
+            key_file: Path to the encryption key file
+        """
         self.key_file = key_file
         self._key = self._load_or_create_key()
         self._fernet = Fernet(self._key)
 
     def _load_or_create_key(self) -> bytes:
-        """加载或创建加密密钥"""
+        """
+        Load existing encryption key or create a new one.
+        
+        Returns:
+            Encryption key bytes
+        """
         try:
             if self.key_file.exists():
-                logger.debug(f"从 {self.key_file} 加载加密密钥")
+                logger.debug(f"Loading encryption key from {self.key_file}")
                 key_data = self.key_file.read_bytes()
                 return key_data
             else:
-                logger.info(f"创建新的加密密钥: {self.key_file}")
-                # 确保父目录存在
+                logger.info(f"Creating new encryption key: {self.key_file}")
+                # Ensure parent directory exists
                 self.key_file.parent.mkdir(parents=True, exist_ok=True)
 
-                # 生成强密钥
+                # Generate strong key
                 key = Fernet.generate_key()
 
-                # 安全写入密钥文件
+                # Securely write key file
                 temp_key_file = self.key_file.with_suffix('.tmp')
                 temp_key_file.write_bytes(key)
-                temp_key_file.chmod(0o600)  # 仅所有者可读写
+                temp_key_file.chmod(0o600)  # Owner read/write only
                 temp_key_file.replace(self.key_file)
 
                 return key
         except Exception as e:
-            logger.error(f"处理加密密钥时出错: {e}")
-            # 如果发生错误，生成临时密钥（仅用于当前会话）
-            logger.warning("使用临时会话密钥")
+            logger.error(f"Error handling encryption key: {e}")
+            # If error occurs, generate temporary key (session only)
+            logger.warning("Using temporary session key")
             return Fernet.generate_key()
 
     def derive_key(self, password: str, salt: bytes = None) -> bytes:
-        """从密码派生密钥"""
+        """
+        Derive encryption key from password.
+        
+        Args:
+            password: User password
+            salt: Salt for key derivation, generated if None
+            
+        Returns:
+            Tuple of (derived_key, salt)
+        """
         if salt is None:
             salt = secrets.token_bytes(16)
 
@@ -59,67 +83,121 @@ class ConfigCrypto:
         return key, salt
 
     def encrypt(self, data: str) -> str:
-        """加密字符串数据，返回加密后的字符串"""
+        """
+        Encrypt string data.
+        
+        Args:
+            data: String data to encrypt
+            
+        Returns:
+            Base64-encoded encrypted string
+            
+        Raises:
+            Exception: If encryption fails
+        """
         try:
             return base64.urlsafe_b64encode(self._fernet.encrypt(data.encode())).decode()
         except Exception as e:
-            logger.error(f"加密失败: {e}")
+            logger.error(f"Encryption failed: {e}")
             raise
 
     def decrypt(self, encrypted_data: str) -> str:
-        """解密字符串数据，返回解密后的字符串"""
+        """
+        Decrypt string data.
+        
+        Args:
+            encrypted_data: Base64-encoded encrypted string
+            
+        Returns:
+            Decrypted string
+            
+        Raises:
+            InvalidToken: If data is corrupted or wrong key
+            Exception: If decryption fails
+        """
         try:
             return self._fernet.decrypt(base64.urlsafe_b64decode(encrypted_data)).decode()
         except InvalidToken:
-            logger.error("无效的加密令牌，数据可能已损坏或使用了错误的密钥")
+            logger.error("Invalid encryption token, data may be corrupted or using wrong key")
             raise
         except Exception as e:
-            logger.error(f"解密失败: {e}")
+            logger.error(f"Decryption failed: {e}")
             raise
 
     def encrypt_bytes(self, data: bytes) -> bytes:
-        """直接加密字节数据，返回加密后的字节"""
+        """
+        Encrypt binary data directly.
+        
+        Args:
+            data: Bytes to encrypt
+            
+        Returns:
+            Encrypted bytes
+            
+        Raises:
+            Exception: If encryption fails
+        """
         try:
             return self._fernet.encrypt(data)
         except Exception as e:
-            logger.error(f"加密字节数据失败: {e}")
+            logger.error(f"Byte encryption failed: {e}")
             raise
 
     def decrypt_bytes(self, encrypted_data: bytes) -> bytes:
-        """直接解密字节数据，返回解密后的字节"""
+        """
+        Decrypt binary data directly.
+        
+        Args:
+            encrypted_data: Encrypted bytes
+            
+        Returns:
+            Decrypted bytes
+            
+        Raises:
+            InvalidToken: If data is corrupted or wrong key
+            Exception: If decryption fails
+        """
         try:
             return self._fernet.decrypt(encrypted_data)
         except InvalidToken:
-            logger.error("无效的加密令牌，数据可能已损坏或使用了错误的密钥")
+            logger.error("Invalid encryption token, data may be corrupted or using wrong key")
             raise
         except Exception as e:
-            logger.error(f"解密字节数据失败: {e}")
+            logger.error(f"Byte decryption failed: {e}")
             raise
 
     def rotate_key(self):
-        """轮换加密密钥"""
+        """
+        Rotate encryption key for enhanced security.
+        
+        Returns:
+            Old key for re-encryption of existing data if needed
+            
+        Raises:
+            Exception: If key rotation fails
+        """
         try:
             old_key = self._key
             new_key = Fernet.generate_key()
 
-            # 创建新密钥的Fernet实例
+            # Create new key's Fernet instance
             new_fernet = Fernet(new_key)
 
-            # 备份旧密钥
+            # Backup old key
             backup_path = self.key_file.with_suffix('.bak')
             if backup_path.exists():
                 backup_path.unlink()
             self.key_file.rename(backup_path)
 
-            # 写入新密钥
+            # Write new key
             self.key_file.write_bytes(new_key)
-            self.key_file.chmod(0o600)  # 仅所有者可读写
+            self.key_file.chmod(0o600)  # Owner read/write only
 
             self._key = new_key
             self._fernet = new_fernet
-            logger.info("加密密钥已轮换")
+            logger.info("Encryption key rotated successfully")
 
-            return old_key  # 返回旧密钥以便需要时重新加密现有数据
+            return old_key  # Return old key for reencryption of existing data
         except Exception as e:
-            logger.error(f"轮换密钥失败: {e}")
+            logger.error(f"Key rotation failed: {e}")
             raise

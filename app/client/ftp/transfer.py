@@ -1,10 +1,9 @@
 from collections import deque
 import time
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 import psutil
 from functools import lru_cache
 import threading
-from typing import Dict, List, Optional, Tuple
 import os
 import json
 from datetime import datetime
@@ -13,6 +12,12 @@ from loguru import logger
 
 class TransferMonitor:
     def __init__(self, history_size: int = 1000, update_interval: float = 1.0):
+        """Initialize transfer monitor with specified history size and update interval.
+        
+        Args:
+            history_size: Maximum number of history records to keep
+            update_interval: Update frequency in seconds
+        """
         self.transfer_history = deque(maxlen=history_size)
         self.start_time = None
         self.end_time = None
@@ -26,7 +31,7 @@ class TransferMonitor:
 
     @lru_cache(maxsize=128)
     def _get_system_metrics(self) -> Dict[str, float]:
-        """获取系统指标，带缓存"""
+        """Get system metrics with caching"""
         return {
             'cpu_usage': psutil.cpu_percent(),
             'memory_usage': psutil.virtual_memory().percent,
@@ -34,7 +39,7 @@ class TransferMonitor:
         }
 
     def start_monitoring(self):
-        """开始监控"""
+        """Start monitoring transfer operations"""
         self.start_time = time.time()
         self.transfer_history.clear()
         with self.lock:
@@ -45,10 +50,16 @@ class TransferMonitor:
             self.monitor_thread = threading.Thread(target=self._monitor_loop)
             self.monitor_thread.daemon = True
             self.monitor_thread.start()
-            logger.debug("传输监控已启动")
+            logger.debug("Transfer monitoring started")
 
     def record_transfer(self, transferred: int, total: int, filename: str):
-        """优化的记录传输"""
+        """Record transfer progress with optimized metrics
+        
+        Args:
+            transferred: Number of bytes transferred
+            total: Total number of bytes
+            filename: Name of the file being transferred
+        """
         current_time = time.time()
         metrics = self._get_system_metrics()
 
@@ -61,17 +72,21 @@ class TransferMonitor:
         })
 
     def stop_monitoring(self):
-        """停止监控"""
+        """Stop transfer monitoring"""
         self.end_time = time.time()
         with self.lock:
             self.monitoring = False
             if self.monitor_thread:
                 self.monitor_thread.join(timeout=2.0)
                 self.monitor_thread = None
-            logger.debug("传输监控已停止")
+            logger.debug("Transfer monitoring stopped")
 
     def get_statistics(self) -> Dict:
-        """优化的统计信息计算"""
+        """Calculate and return optimized transfer statistics
+        
+        Returns:
+            Dictionary containing transfer statistics
+        """
         if not self.transfer_history:
             return {}
 
@@ -89,14 +104,21 @@ class TransferMonitor:
         }
 
     def _calculate_efficiency(self, records: list) -> float:
-        """计算传输效率"""
+        """Calculate transfer efficiency ratio
+        
+        Args:
+            records: List of transfer records
+            
+        Returns:
+            Efficiency ratio as a float
+        """
         if not records:
             return 0.0
         successful_transfers = sum(1 for r in records if r['transferred'] > 0)
         return successful_transfers / len(records)
 
     def _monitor_loop(self):
-        """监控循环，计算传输速度"""
+        """Monitoring loop that calculates transfer speed"""
         while self.monitoring:
             with self.lock:
                 current_time = time.time()
@@ -104,34 +126,39 @@ class TransferMonitor:
                     if transfer['status'] in ('completed', 'failed'):
                         continue
 
-                    # 计算经过的时间
+                    # Calculate elapsed time
                     elapsed = current_time - transfer['last_update_time']
                     if elapsed > 0:
-                        # 计算传输速度 (bytes/s)
+                        # Calculate transfer speed (bytes/s)
                         transfer['speed'] = (
                             transfer['current_bytes'] - transfer['last_bytes']) / elapsed
                         transfer['last_bytes'] = transfer['current_bytes']
                         transfer['last_update_time'] = current_time
 
-                        # 估计剩余时间
+                        # Estimate remaining time
                         if transfer['speed'] > 0 and transfer['total_bytes'] > 0:
                             remaining_bytes = transfer['total_bytes'] - \
                                 transfer['current_bytes']
                             transfer['estimated_time'] = remaining_bytes / \
                                 transfer['speed']
 
-                        # 更新进度
+                        # Update progress
                         if transfer['total_bytes'] > 0:
                             transfer['progress'] = (
                                 transfer['current_bytes'] / transfer['total_bytes']) * 100
 
-                        # 记录历史数据
+                        # Record history data
                         self._record_history(transfer_id, transfer)
 
             time.sleep(self.update_interval)
 
     def _record_history(self, transfer_id: str, transfer: Dict):
-        """记录传输历史数据"""
+        """Record transfer history data
+        
+        Args:
+            transfer_id: Unique transfer identifier
+            transfer: Transfer data dictionary
+        """
         history_entry = {
             'timestamp': time.time(),
             'transfer_id': transfer_id,
@@ -143,12 +170,21 @@ class TransferMonitor:
 
         self.history.append(history_entry)
 
-        # 限制历史记录大小
+        # Limit history size
         if len(self.history) > self.max_history_size:
             self.history.pop(0)
 
     def create_transfer(self, transfer_id: str, total_bytes: int, filename: str) -> Dict:
-        """创建新的传输记录"""
+        """Create a new transfer record
+        
+        Args:
+            transfer_id: Unique transfer identifier
+            total_bytes: Total size of the transfer in bytes
+            filename: Name of the file being transferred
+            
+        Returns:
+            Newly created transfer record
+        """
         transfer = {
             'start_time': time.time(),
             'last_update_time': time.time(),
@@ -169,7 +205,13 @@ class TransferMonitor:
         return transfer
 
     def update_transfer(self, transfer_id: str, current_bytes: int, status: Optional[str] = None):
-        """更新传输进度"""
+        """Update transfer progress
+        
+        Args:
+            transfer_id: Unique transfer identifier
+            current_bytes: Current number of bytes transferred
+            status: Optional new status
+        """
         with self.lock:
             if transfer_id not in self.transfers:
                 return
@@ -186,7 +228,14 @@ class TransferMonitor:
                 transfer['end_time'] = time.time()
 
     def get_transfer_info(self, transfer_id: str) -> Optional[Dict]:
-        """获取传输信息"""
+        """Get transfer information
+        
+        Args:
+            transfer_id: Unique transfer identifier
+            
+        Returns:
+            Transfer information or None if not found
+        """
         with self.lock:
             if transfer_id not in self.transfers:
                 return None
@@ -205,13 +254,21 @@ class TransferMonitor:
             }
 
     def get_active_transfers(self) -> List[Tuple[str, Dict]]:
-        """获取所有活动的传输"""
+        """Get all active transfers
+        
+        Returns:
+            List of (transfer_id, transfer_info) tuples for active transfers
+        """
         with self.lock:
             return [(tid, transfer) for tid, transfer in self.transfers.items()
                     if transfer['status'] == 'running']
 
     def cleanup_completed(self, age_threshold: float = 3600):
-        """清理已完成的传输记录"""
+        """Clean up completed transfer records
+        
+        Args:
+            age_threshold: Age in seconds after which to remove completed records
+        """
         current_time = time.time()
         with self.lock:
             for transfer_id in list(self.transfers.keys()):
@@ -221,7 +278,11 @@ class TransferMonitor:
                         del self.transfers[transfer_id]
 
     def export_history(self, filename: str):
-        """导出传输历史到文件"""
+        """Export transfer history to a file
+        
+        Args:
+            filename: Path to export the history data
+        """
         with self.lock:
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump({

@@ -9,7 +9,11 @@ from .events import EventManager
 
 
 class ConnectionManager:
-    """连接管理器"""
+    """WebSocket Connection Manager
+    
+    Manages WebSocket connection lifecycle, including connection establishment,
+    monitoring, heartbeat, automatic reconnection and graceful shutdown.
+    """
 
     def __init__(self, config: WebSocketConfig, event_manager: EventManager):
         self.config = config
@@ -22,11 +26,18 @@ class ConnectionManager:
         self._lock = asyncio.Lock()
         self._closing = False
         self._closed_event = asyncio.Event()
-        self._closed_event.set()  # 初始状态为已关闭
+        self._closed_event.set()  # Initially marked as closed
 
     @asynccontextmanager
     async def connection_context(self):
-        """连接上下文管理器"""
+        """Connection context manager
+        
+        Creates a context where a connection is guaranteed to be established
+        and properly closed when exiting the context.
+        
+        Yields:
+            ConnectionManager: Self reference
+        """
         try:
             await self.connect()
             yield self
@@ -34,24 +45,31 @@ class ConnectionManager:
             await self.close()
 
     async def connect(self) -> bool:
-        """改进的连接实现"""
+        """Establish WebSocket connection
+        
+        Connects to WebSocket server using the provided configuration.
+        Implements connection locking to prevent concurrent connection attempts.
+        
+        Returns:
+            bool: True if connected successfully, False otherwise
+        """
         if self._closing:
             return False
 
-        # 如果已连接，直接返回
+        # Return immediately if already connected
         if self.connected and self.connection and not self.connection.closed:
             return True
 
-        # 使用快速锁检查避免锁竞争
+        # Fast lock check to avoid lock contention
         if self._lock.locked():
             return False
 
         async with self._lock:
-            # 双重检查，避免重复连接
+            # Double-check to avoid duplicate connections
             if self.connected and self.connection and not self.connection.closed:
                 return True
 
-            # 如果正在关闭，等待完全关闭
+            # Wait for complete closure if closing
             if self._closing:
                 await self._closed_event.wait()
 
@@ -67,11 +85,11 @@ class ConnectionManager:
                     'max_size': self.config.max_size,
                     'compression': self.config.compression,
                     'close_timeout': self.config.close_timeout,
-                    # 添加连接超时
+                    # Add connection timeout
                     'open_timeout': 30.0
                 }
 
-                # 过滤None值的参数
+                # Filter out None parameters
                 connect_kwargs = {k: v for k,
                                   v in connect_kwargs.items() if v is not None}
 
@@ -82,7 +100,7 @@ class ConnectionManager:
                 self.connected = True
                 self._reconnect_attempts = 0
 
-                # 启动心跳任务
+                # Start heartbeat task
                 self._ping_task = self._create_task(self._keep_alive())
                 self._create_task(self._monitor_connection())
 
@@ -90,21 +108,32 @@ class ConnectionManager:
                 return True
 
             except Exception as e:
-                self._closed_event.set()  # 连接失败，设置为已关闭
+                self._closed_event.set()  # Mark as closed on connection failure
                 logger.error(
                     f"Connection failed: {type(e).__name__}: {str(e)}")
                 await self.event_manager.trigger('error', e)
                 return False
 
     def _create_task(self, coro):
-        """创建和跟踪任务"""
+        """Create and track a task
+        
+        Args:
+            coro: Coroutine to execute as a task
+            
+        Returns:
+            asyncio.Task: Created task
+        """
         task = asyncio.create_task(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return task
 
     async def _keep_alive(self):
-        """保持连接活跃"""
+        """Keep connection alive with ping/pong mechanism
+        
+        Periodically sends ping frames and monitors pong responses.
+        Triggers reconnection if ping times out.
+        """
         with suppress(asyncio.CancelledError):
             while self.connected and self.connection and not self.connection.closed:
                 try:
@@ -126,7 +155,10 @@ class ConnectionManager:
                     break
 
     async def _monitor_connection(self):
-        """监控连接状态"""
+        """Monitor connection state
+        
+        Detects unexpected connection closures and handles disconnection events.
+        """
         with suppress(asyncio.CancelledError):
             try:
                 while self.connected and self.connection and not self.connection.closed:
@@ -140,7 +172,7 @@ class ConnectionManager:
                             f"Connection monitor error: {type(e).__name__}: {str(e)}")
                         break
 
-                # 只有在循环结束时才处理断连
+                # Only process disconnection at loop end
                 if self.connected:
                     await self._handle_disconnection()
 
@@ -151,38 +183,45 @@ class ConnectionManager:
                     await self._handle_disconnection()
 
     async def _handle_disconnection(self, reconnect=False):
-        """处理断开连接"""
+        """Handle connection closure
+        
+        Args:
+            reconnect: Whether to attempt reconnection
+        """
         if not self.connected:
             return
 
         async with self._lock:
-            if not self.connected:  # 双重检查
+            if not self.connected:  # Double-check
                 return
 
             self.connected = False
             await self.event_manager.trigger('disconnect')
 
-            # 取消所有任务
+            # Cancel all tasks
             for task in list(self._tasks):
                 if not task.done() and task != asyncio.current_task():
                     task.cancel()
 
-            # 关闭连接
+            # Close connection
             if self.connection and not self.connection.closed:
                 with suppress(Exception):
                     await self.connection.close()
 
             await self.event_manager.trigger('after_disconnect')
-            self._closed_event.set()  # 标记完全关闭
+            self._closed_event.set()  # Mark as fully closed
 
-            # 自动重连
+            # Auto-reconnect
             if reconnect and self.config.auto_reconnect and not self._closing:
                 if self.config.max_reconnect_attempts == -1 or self._reconnect_attempts < self.config.max_reconnect_attempts:
                     self._reconnect_attempts += 1
                     self._create_task(self._reconnect())
 
     async def _reconnect(self):
-        """重新连接逻辑"""
+        """Reconnect after connection loss
+        
+        Implements exponential backoff for reconnection attempts.
+        """
         await asyncio.sleep(self.config.reconnect_interval)
         logger.info(
             f"Attempting to reconnect (attempt {self._reconnect_attempts})...")
@@ -190,7 +229,10 @@ class ConnectionManager:
         await self.connect()
 
     async def close(self):
-        """关闭连接"""
+        """Close the WebSocket connection gracefully
+        
+        Ensures all pending tasks are cancelled and connection is properly closed.
+        """
         if not self.connected and self._closed_event.is_set():
             return
 
@@ -204,17 +246,17 @@ class ConnectionManager:
             try:
                 self.connected = False
 
-                # 取消所有任务
+                # Cancel all tasks
                 for task in list(self._tasks):
                     if not task.done():
                         task.cancel()
 
-                # 等待任务取消完成
+                # Wait for task cancellation to complete
                 if self._tasks:
                     with suppress(asyncio.TimeoutError):
                         await asyncio.wait([t for t in self._tasks], timeout=2.0)
 
-                # 关闭WebSocket连接
+                # Close WebSocket connection
                 if self.connection and not self.connection.closed:
                     await self.connection.close(code=1000, reason="Client closed connection")
 

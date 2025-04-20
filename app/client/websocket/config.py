@@ -5,7 +5,10 @@ import ssl
 
 @dataclass
 class WebSocketConfig:
-    """WebSocket客户端配置"""
+    """WebSocket Client Configuration
+    
+    This class defines all configuration parameters for a WebSocket connection.
+    """
     uri: str
     ssl_context: Optional[ssl.SSLContext] = None
     headers: Optional[Dict[str, str]] = None
@@ -17,19 +20,19 @@ class WebSocketConfig:
     max_size: int = 2**20  # 1MB
     compression: Optional[str] = None
     auto_reconnect: bool = False
-    max_reconnect_attempts: int = -1  # -1表示无限重试
+    max_reconnect_attempts: int = -1  # -1 means unlimited retries
     reconnect_interval: float = 5.0
     receive_timeout: Optional[float] = None
 
     def __post_init__(self):
-        # 确保extra_options是字典
+        # Ensure extra_options is a dictionary
         if self.extra_options is None:
             self.extra_options = {}
 
-        # 确保headers是字典
+        # Ensure headers is a dictionary
         if self.headers is None:
             self.headers = {}
 
-        # 确保subprotocols是列表
+        # Ensure subprotocols is a list
         if self.subprotocols is None:
             self.subprotocols = []

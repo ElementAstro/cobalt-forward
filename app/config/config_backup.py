@@ -11,25 +11,46 @@ from typing import List, Dict, Any, Optional
 
 
 class ConfigBackup:
+    """
+    Configuration backup management system.
+    Handles creating, verifying, and restoring configuration backups with metadata.
+    """
     def __init__(self, backup_dir: Path, max_backups: int = 10):
+        """
+        Initialize the backup manager.
+        
+        Args:
+            backup_dir: Directory to store backups
+            max_backups: Maximum number of backups to retain
+        """
         self.backup_dir = backup_dir
         self.backup_dir.mkdir(parents=True, exist_ok=True)
         self.max_backups = max_backups
         self.compression = zipfile.ZIP_DEFLATED
 
     def _rotate_backups(self):
-        """轮转旧的备份文件"""
+        """
+        Rotate old backup files, removing the oldest when max_backups is reached.
+        """
         backups = self.list_backups()
         while len(backups) >= self.max_backups:
             oldest_backup = backups.pop()
             try:
                 oldest_backup.unlink()
-                logger.info(f"删除旧备份: {oldest_backup}")
+                logger.info(f"Deleted old backup: {oldest_backup}")
             except Exception as e:
-                logger.error(f"删除旧备份失败: {e}")
+                logger.error(f"Failed to delete old backup: {e}")
 
     def _calculate_checksum(self, file_path: Path) -> str:
-        """计算文件的SHA256校验和"""
+        """
+        Calculate SHA256 checksum of a file.
+        
+        Args:
+            file_path: Path to the file
+            
+        Returns:
+            Hexadecimal checksum string
+        """
         h = hashlib.sha256()
         with open(file_path, 'rb') as f:
             for chunk in iter(lambda: f.read(4096), b''):
@@ -37,16 +58,28 @@ class ConfigBackup:
         return h.hexdigest()
 
     def create_backup(self, config_path: Path, metadata: dict = None) -> Path:
-        """创建配置备份"""
+        """
+        Create a configuration backup.
+        
+        Args:
+            config_path: Path to the configuration file to backup
+            metadata: Additional metadata to store with backup
+            
+        Returns:
+            Path to the created backup file
+            
+        Raises:
+            FileNotFoundError: If the config file doesn't exist
+        """
         if not config_path.exists():
-            logger.warning(f"配置文件不存在: {config_path}，无法创建备份")
-            raise FileNotFoundError(f"配置文件不存在: {config_path}")
+            logger.warning(f"Config file doesn't exist: {config_path}, cannot create backup")
+            raise FileNotFoundError(f"Config file doesn't exist: {config_path}")
 
-        # 生成时间戳和备份文件名
+        # Generate timestamp and backup filename
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = self.backup_dir / f"config_backup_{timestamp}.zip"
 
-        # 准备元数据
+        # Prepare metadata
         if metadata is None:
             metadata = {}
 
@@ -56,62 +89,79 @@ class ConfigBackup:
             "checksum": self._calculate_checksum(config_path)
         })
 
-        # 创建临时备份文件
+        # Create temporary backup file
         temp_dir = tempfile.mkdtemp()
         temp_backup = Path(temp_dir) / backup_path.name
 
         try:
             with zipfile.ZipFile(temp_backup, 'w', compression=self.compression) as backup_zip:
-                # 添加配置文件
+                # Add config file
                 backup_zip.write(config_path, arcname=config_path.name)
-                # 添加元数据
+                # Add metadata
                 backup_zip.writestr(
                     'metadata.json', json.dumps(metadata, indent=2))
 
-            # 移动临时备份文件到目标位置
+            # Move temporary backup file to target location
             if backup_path.exists():
                 backup_path.unlink()
             shutil.move(temp_backup, backup_path)
 
-            logger.info(f"配置备份已创建: {backup_path}")
+            logger.info(f"Configuration backup created: {backup_path}")
             self._rotate_backups()
             return backup_path
 
         except Exception as e:
-            logger.error(f"创建备份失败: {e}")
+            logger.error(f"Failed to create backup: {e}")
             raise
         finally:
-            # 清理临时目录
+            # Clean up temporary directory
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def verify_backup(self, backup_path: Path) -> bool:
-        """验证备份文件的完整性"""
+        """
+        Verify the integrity of a backup file.
+        
+        Args:
+            backup_path: Path to the backup file
+            
+        Returns:
+            True if backup is valid, False otherwise
+        """
         try:
             with zipfile.ZipFile(backup_path, 'r') as backup_zip:
-                # 检查备份文件结构
+                # Check backup file structure
                 file_list = backup_zip.namelist()
                 if 'metadata.json' not in file_list:
-                    logger.error(f"备份验证失败: {backup_path} 缺少元数据")
+                    logger.error(f"Backup verification failed: {backup_path} is missing metadata")
                     return False
 
-                # 加载元数据
+                # Load metadata
                 metadata = json.loads(backup_zip.read('metadata.json'))
 
-                # 确保至少有一个配置文件
+                # Ensure at least one config file exists
                 config_files = [f for f in file_list if f != 'metadata.json']
                 if not config_files:
-                    logger.error(f"备份验证失败: {backup_path} 不包含配置文件")
+                    logger.error(f"Backup verification failed: {backup_path} doesn't contain config files")
                     return False
 
-            logger.debug(f"备份验证成功: {backup_path}")
+            logger.debug(f"Backup verification successful: {backup_path}")
             return True
 
         except Exception as e:
-            logger.error(f"备份验证失败: {e}")
+            logger.error(f"Backup verification failed: {e}")
             return False
 
     def restore_backup(self, backup_path: Path, target_path: Path) -> dict:
-        """从备份恢复配置"""
+        """
+        Restore configuration from backup.
+        
+        Args:
+            backup_path: Path to the backup file
+            target_path: Path where the config should be restored
+            
+        Returns:
+            Metadata dictionary from the backup
+        """
         with zipfile.ZipFile(backup_path, 'r') as backup_zip:
             config_file = next(
                 name for name in backup_zip.namelist() if name != 'metadata.json')
@@ -121,10 +171,16 @@ class ConfigBackup:
             if 'metadata.json' in backup_zip.namelist():
                 metadata = json.loads(backup_zip.read('metadata.json'))
 
-        logger.info(f"配置已从备份恢复: {backup_path}")
+        logger.info(f"Configuration restored from backup: {backup_path}")
         return metadata
 
     def list_backups(self) -> list:
+        """
+        List all available backups, sorted by modification time (newest first).
+        
+        Returns:
+            List of backup file paths
+        """
         return sorted(
             [f for f in self.backup_dir.glob("config_backup_*.zip")],
             key=lambda x: x.stat().st_mtime,

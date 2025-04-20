@@ -5,13 +5,13 @@ from typing import List, Optional
 
 def get_file_hash(filepath: str) -> str:
     """
-    获取文件的MD5哈希值
-
+    Calculate MD5 hash of a file
+    
     Args:
-        filepath: 文件路径
-
+        filepath: Path to the file
+        
     Returns:
-        str: 文件的MD5哈希值
+        str: MD5 hash of the file as hexadecimal string
     """
     hash_md5 = hashlib.md5()
     with open(filepath, "rb") as f:
@@ -22,26 +22,26 @@ def get_file_hash(filepath: str) -> str:
 
 def get_local_files(directory: str, exclude: Optional[List[str]] = None) -> List[str]:
     """
-    递归获取本地目录中的所有文件路径
-
+    Recursively get all file paths from a local directory
+    
     Args:
-        directory: 本地目录路径
-        exclude: 要排除的文件/目录模式列表
-
+        directory: Local directory path
+        exclude: List of file/directory patterns to exclude
+        
     Returns:
-        List[str]: 文件路径列表
+        List[str]: List of file paths
     """
     exclude = exclude or []
     result = []
 
     for root, dirs, files in os.walk(directory):
-        # 排除不需要遍历的目录
+        # Exclude directories that shouldn't be traversed
         dirs[:] = [d for d in dirs if not any(
             os.path.join(root, d).startswith(os.path.join(directory, ex)) for ex in exclude)]
 
         for file in files:
             file_path = os.path.join(root, file)
-            # 检查文件是否应该被排除
+            # Check if file should be excluded
             if not any(file_path.startswith(os.path.join(directory, ex)) for ex in exclude):
                 result.append(file_path)
 
@@ -50,15 +50,15 @@ def get_local_files(directory: str, exclude: Optional[List[str]] = None) -> List
 
 def is_path_excluded(path: str, base_path: str, exclude_patterns: List[str]) -> bool:
     """
-    检查路径是否应该被排除
-
+    Check if a path should be excluded based on patterns
+    
     Args:
-        path: 要检查的路径
-        base_path: 基础路径
-        exclude_patterns: 排除模式列表
-
+        path: Path to check
+        base_path: Base path for relative path calculation
+        exclude_patterns: List of exclusion patterns
+        
     Returns:
-        bool: 如果路径应该被排除则返回True，否则False
+        bool: True if path should be excluded, False otherwise
     """
     rel_path = os.path.relpath(path, base_path)
     return any(rel_path.startswith(pattern) for pattern in exclude_patterns)

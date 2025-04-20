@@ -6,7 +6,7 @@ from io import StringIO
 
 
 class SSHStreamHandler:
-    """流式输出处理器"""
+    """Handles streaming output from SSH connections"""
 
     def __init__(self):
         self._buffer_size = 4096
@@ -15,13 +15,13 @@ class SSHStreamHandler:
 
     def stream_output(self, channel: paramiko.Channel) -> Generator[Dict[str, str], None, None]:
         """
-        从SSH通道流式获取输出
-
+        Stream output from an SSH channel
+        
         Args:
-            channel: Paramiko Channel对象
-
+            channel: Paramiko Channel object
+            
         Yields:
-            Dict[str, str]: 包含stdout和stderr数据的字典
+            Dict[str, str]: Dictionary containing stdout and stderr data
         """
         stdout_buffer = StringIO()
         stderr_buffer = StringIO()
@@ -50,20 +50,20 @@ class SSHStreamHandler:
             if not (channel.recv_ready() or channel.recv_stderr_ready()) and not channel.exit_status_ready():
                 time.sleep(self._timeout)
 
-        # 处理退出码
+        # Process exit code
         exit_status = channel.recv_exit_status()
         yield {"stdout": "", "stderr": "", "exit_status": exit_status}
 
     def process_stream(self, channel: paramiko.Channel, callback: Callable[[Dict[str, Any]], None]) -> int:
         """
-        处理SSH通道的输出并通过回调函数处理
-
+        Process SSH channel output using a callback function
+        
         Args:
-            channel: Paramiko Channel对象
-            callback: 处理输出的回调函数
-
+            channel: Paramiko Channel object
+            callback: Callback function to process output
+            
         Returns:
-            int: 命令退出状态
+            int: Command exit status
         """
         for output in self.stream_output(channel):
             callback(output)
@@ -73,12 +73,12 @@ class SSHStreamHandler:
 
     def collect_output(self, channel: paramiko.Channel, timeout: Optional[float] = None) -> Tuple[str, str, int]:
         """
-        收集SSH通道的完整输出
-
+        Collect complete output from an SSH channel
+        
         Args:
-            channel: Paramiko Channel对象
-            timeout: 超时时间（秒）
-
+            channel: Paramiko Channel object
+            timeout: Timeout in seconds
+            
         Returns:
             Tuple[str, str, int]: (stdout, stderr, exit_status)
         """
@@ -98,19 +98,19 @@ class SSHStreamHandler:
 
             if timeout and (time.time() - start_time) > timeout:
                 if not exit_status:
-                    exit_status = -1  # 表示超时
+                    exit_status = -1  # Indicates timeout
                 break
 
         return ''.join(stdout_chunks), ''.join(stderr_chunks), exit_status or -1
 
     def set_buffer_size(self, size: int) -> None:
-        """设置缓冲区大小"""
+        """Set buffer size for reading stream data"""
         self._buffer_size = size
 
     def set_encoding(self, encoding: str) -> None:
-        """设置字符编码"""
+        """Set character encoding for stream data"""
         self._encoding = encoding
 
     def set_timeout(self, timeout: float) -> None:
-        """设置轮询超时"""
+        """Set polling timeout interval"""
         self._timeout = timeout

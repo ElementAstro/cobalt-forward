@@ -1,482 +1,779 @@
 from concurrent.futures import ThreadPoolExecutor
-import cachetools
 import time
-from .utils import parse_payload
-from .exceptions import ConnectionError, PublishError, SubscriptionError
-from .constants import MQTTQoS, MQTT_CONNECTION_CODES
-from .models import MQTTConfig, MQTTMessage, PerformanceMetrics
-from typing import Any, Dict, List, Optional, Callable
-import queue
-import threading
-from loguru import logger
-from ..base import BaseClient, BaseConfig
-from dataclasses import dataclass
-import paho.mqtt.client as mqtt
 import asyncio
-import aiocache
-from .utils import measure_time, async_measure_time
+import paho.mqtt.client as mqtt
+from typing import Any, Dict, List, Optional, Callable, Set, Tuple, Union
+import uuid
+import cachetools
+from loguru import logger
 
-
-@dataclass
-class MQTTConfig(BaseConfig):
-    client_id: str
-    clean_session: bool = True
-    username: str = None
-    password: str = None
-    message_cache_size: int = 1000
-    batch_size: int = 100
-    ssl_config: dict = None
-
-
-class MQTTClient(BaseClient):
-    """增强的MQTT客户端实现"""
-
-    def __init__(self, config: MQTTConfig):
-        super().__init__(config)
-        if not config.validate():
-            raise ValueError("Invalid MQTT configuration")
-
-        self.client = mqtt.Client(
-            client_id=config.client_id,
-            clean_session=config.clean_session
-        )
-        self._setup_callbacks()
-        self._configure_auth_and_ssl()
-        self.message_queue = asyncio.Queue()
-
-    async def connect(self) -> bool:
-        """实现MQTT连接"""
-        try:
-            await asyncio.get_event_loop().run_in_executor(
-                self._executor,
-                self._connect_sync
-            )
-            self.connected = True
-            return True
-        except Exception as e:
-            logger.error(f"MQTT connection failed: {str(e)}")
-            return False
-
-    async def disconnect(self) -> None:
-        """实现MQTT断开连接"""
-        if self.client:
-            await asyncio.get_event_loop().run_in_executor(
-                self._executor,
-                self.client.disconnect
-            )
-        self.connected = False
-
-    async def send(self, data: Any) -> bool:
-        """实现MQTT消息发送"""
-        return await self.execute_with_retry(self._publish_message, data)
-
-    async def receive(self) -> Optional[Any]:
-        """实现MQTT消息接收"""
-        try:
-            return await self.message_queue.get()
-        except Exception:
-            return None
-
-    def _connect_sync(self):
-        """同步连接实现"""
-        self.client.connect(
-            self.config.host,
-            self.config.port,
-            keepalive=self.config.keep_alive_interval
-        )
-        self.client.loop_start()
-
-
-class MQTTCallback:
-    """回调处理类"""
-
-    def __init__(self, callback: Callable, topics: List[str]):
-        self.callback = callback
-        self.topics = topics
-        self.created_at = time.time()
+from .exceptions import (
+    ConnectionError, 
+    PublishError, 
+    SubscriptionError, 
+    ConfigurationError,
+    CircuitBreakerOpenError,
+    TimeoutError
+)
+from .constants import MQTTQoS, MQTT_CONNECTION_CODES
+from .models import (
+    MQTTConfig, 
+    MQTTMessage, 
+    MQTTSubscription, 
+    MQTTBatchMessage,
+    PerformanceMetrics, 
+    RetryConfig
+)
+from .utils import (
+    parse_payload, 
+    measure_time, 
+    async_measure_time, 
+    validate_topic, 
+    CircuitBreaker
+)
 
 
 class MQTTClient:
-    """增强的MQTT客户端"""
+    """Enhanced MQTT client implementation
+    
+    Features:
+    - Async-first API design
+    - Automatic reconnection
+    - Circuit breaker for fault tolerance
+    - Message batching
+    - Performance metrics
+    - Retry mechanism
+    - Message caching
+    - QoS support
+    - SSL/TLS support
+    """
 
     def __init__(self, config: MQTTConfig):
+        """Initialize the MQTT client with configuration
+        
+        Args:
+            config: MQTT client configuration
+        
+        Raises:
+            ConfigurationError: If configuration is invalid
+        """
+        # Validate configuration
         if not config.validate():
-            raise ValueError("Invalid MQTT configuration")
-
+            raise ConfigurationError("Invalid MQTT configuration")
+        
         self.config = config
-        self.client = mqtt.Client(client_id=config.client_id,
-                                  clean_session=config.clean_session)
-        self.connected = False
-        self.callbacks: Dict[str, List[MQTTCallback]] = {}
-        self.reconnect_count = 0
-        self.message_queue = queue.Queue()
-        self.stopping = False
-        self.last_message_id = 0
-        self.message_callbacks: Dict[int, Callable] = {}
-        self.metrics = PerformanceMetrics()
-        self.message_cache = cachetools.TTLCache(
+        
+        # Core components
+        self._executor = ThreadPoolExecutor(max_workers=4)
+        self._client = mqtt.Client(
+            client_id=config.client_id,
+            clean_session=config.clean_session
+        )
+        self._message_cache = cachetools.TTLCache(
             maxsize=config.message_cache_size,
             ttl=300
         )
-        self.retry_queue = queue.PriorityQueue()
-        self.batch_queue = queue.Queue(maxsize=config.batch_size)
-        self.thread_pool = ThreadPoolExecutor(max_workers=4)
-
-        self._message_cache = cachetools.LRUCache(
-            maxsize=config.message_cache_size
+        
+        # Queues
+        self._message_queue = asyncio.Queue()
+        self._batch_queue = asyncio.Queue(maxsize=config.batch_size)
+        self._retry_queue = asyncio.PriorityQueue()
+        
+        # State variables
+        self._subscriptions: Dict[str, MQTTSubscription] = {}
+        self._stopping = False
+        self._connected = False
+        self._reconnect_count = 0
+        self._last_message_id = 0
+        self._pending_messages: Dict[str, MQTTMessage] = {}
+        self._message_callbacks: Dict[str, Callable] = {}
+        
+        # Locks and synchronization
+        self._connection_lock = asyncio.Lock()
+        self._publish_lock = asyncio.Lock()
+        self._subscription_lock = asyncio.Lock()
+        
+        # Performance metrics
+        self._metrics = PerformanceMetrics()
+        
+        # Circuit breaker
+        self._circuit_breaker = CircuitBreaker(
+            failure_threshold=config.circuit_breaker_threshold,
+            reset_timeout=config.circuit_breaker_reset_timeout
         )
-        self._batch_processor = asyncio.Queue(maxsize=config.batch_size)
-        self._retry_processor = asyncio.PriorityQueue()
-        self._loop = asyncio.get_event_loop()
-        self._lock = asyncio.Lock()
-
-        # 设置基本回调
+        
+        # Background tasks
+        self._tasks = []
+        
+        # Configure the client
         self._setup_callbacks()
-
-        # 设置认证和SSL
         self._configure_auth_and_ssl()
 
-        # 启动消息处理线程
-        self._start_message_processor()
-
-        # 启动心跳检测
-        self._start_heartbeat()
-        # 启动重试处理器
-        self._start_retry_processor()
-        # 启动批处理器
-        self._start_batch_processor()
-
     async def __aenter__(self):
+        """Async context manager entry"""
         await self.connect()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit"""
         await self.disconnect()
-
-    async def connect(self):
-        async with self._lock:
-            try:
-                await self._loop.run_in_executor(None, self._connect_sync)
-                self._start_tasks()
-                return True
-            except Exception as e:
-                logger.error(f"Connection failed: {e}")
-                raise ConnectionError(str(e))
-
+        
     def _setup_callbacks(self):
-        """设置回调函数"""
-        self.client.on_connect = self._on_connect
-        self.client.on_disconnect = self._on_disconnect
-        self.client.on_message = self._on_message
-        self.client.on_publish = self._on_publish
-        self.client.on_subscribe = self._on_subscribe
-        self.client.on_unsubscribe = self._on_unsubscribe
-
+        """Set up MQTT client callbacks"""
+        self._client.on_connect = self._on_connect
+        self._client.on_disconnect = self._on_disconnect
+        self._client.on_message = self._on_message
+        self._client.on_publish = self._on_publish
+        self._client.on_subscribe = self._on_subscribe
+        self._client.on_unsubscribe = self._on_unsubscribe
+        
     def _configure_auth_and_ssl(self):
-        """配置认证和SSL"""
+        """Configure authentication and SSL/TLS"""
         if self.config.username and self.config.password:
-            self.client.username_pw_set(
-                self.config.username, self.config.password)
-
-        if self.config.ssl_config:
-            self.client.tls_set(**self.config.ssl_config)
-
-    def _start_message_processor(self):
-        """启动消息处理线程"""
-        self.message_processor = threading.Thread(
-            target=self._process_message_queue)
-        self.message_processor.daemon = True
-        self.message_processor.start()
-
-    def _start_heartbeat(self):
-        """启动心跳检测"""
-        def heartbeat_check():
-            while not self.stopping:
-                if self.connected:
-                    self.client.ping()
-                time.sleep(self.config.heartbeat_interval)
-
-        self.heartbeat_thread = threading.Thread(target=heartbeat_check)
-        self.heartbeat_thread.daemon = True
-        self.heartbeat_thread.start()
-
-    def _start_retry_processor(self):
-        """启动重试处理器"""
-        def retry_processor():
-            while not self.stopping:
-                try:
-                    priority, message = self.retry_queue.get(timeout=1)
-                    if message.retry_count < self.config.retry_config.max_retries:
-                        message.retry_count += 1
-                        backoff = self.config.retry_config.retry_interval * (
-                            self.config.retry_config.retry_backoff ** message.retry_count
-                        )
-                        time.sleep(backoff)
-                        self._publish_message(message)
-                    else:
-                        logger.error(
-                            f"Message {message.message_id} failed after max retries")
-                except queue.Empty:
-                    continue
-
-        self.retry_thread = threading.Thread(target=retry_processor)
-        self.retry_thread.daemon = True
-        self.retry_thread.start()
-
-    def _start_batch_processor(self):
-        """启动批处理器"""
-        def batch_processor():
-            while not self.stopping:
-                batch = []
-                try:
-                    while len(batch) < self.config.batch_size:
-                        message = self.batch_queue.get(timeout=0.1)
-                        batch.append(message)
-                except queue.Empty:
-                    pass
-
-                if batch:
-                    self._process_batch(batch)
-
-        self.batch_thread = threading.Thread(target=batch_processor)
-        self.batch_thread.daemon = True
-        self.batch_thread.start()
-
-    async def _process_batch(self, messages: List[MQTTMessage]):
-        async with self._lock:
-            tasks = [
-                self._publish_message_async(msg)
-                for msg in messages
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            return all(r is True for r in results)
-
-    async def _publish_message_async(self, message: MQTTMessage) -> bool:
-        try:
-            message_size = len(str(message.payload).encode('utf-8'))
-            start_time = time.time()
-
-            result = await self._loop.run_in_executor(
-                None,
-                self.client.publish,
-                message.topic,
-                message.payload,
-                message.qos.value,
-                message.retain
+            self._client.username_pw_set(
+                self.config.username, self.config.password
             )
-
-            success = result.rc == mqtt.MQTT_ERR_SUCCESS
-            process_time = time.time() - start_time
-
-            await self._update_metrics_async(success, message_size, process_time)
-
-            if not success:
-                await self._retry_processor.put((time.time(), message))
-            else:
-                self._message_cache[message.message_id] = message
-
-            return success
-
+            
+        if self.config.ssl_config:
+            self._client.tls_set(**self.config.ssl_config)
+    
+    def _on_connect(self, client, userdata, flags, rc):
+        """Handle connection event"""
+        logger.info(f"MQTT connection result: {MQTT_CONNECTION_CODES.get(rc, f'Unknown ({rc})')}")
+        if rc == 0:
+            self._connected = True
+            self._reconnect_count = 0
+            # Resubscribe to topics on reconnect
+            asyncio.create_task(self._resubscribe_to_topics())
+        else:
+            self._connected = False
+            
+    def _on_disconnect(self, client, userdata, rc):
+        """Handle disconnection event"""
+        self._connected = False
+        if rc != 0:
+            logger.warning(f"Unexpected MQTT disconnection: {rc}")
+            asyncio.create_task(self._handle_reconnect())
+        else:
+            logger.info("MQTT client disconnected")
+            
+    def _on_message(self, client, userdata, msg):
+        """Handle incoming message"""
+        try:
+            payload = parse_payload(msg.payload)
+            message = MQTTMessage(
+                topic=msg.topic,
+                payload=payload,
+                qos=MQTTQoS(msg.qos),
+                retain=msg.retain
+            )
+            asyncio.create_task(self._process_incoming_message(message))
         except Exception as e:
-            logger.error(f"Publish error: {e}")
-            await self._retry_processor.put((time.time(), message))
-            return False
-
-    def _start_tasks(self):
-        self._tasks = [
-            asyncio.create_task(self._process_retry_queue()),
-            asyncio.create_task(self._process_batch_queue()),
-            asyncio.create_task(self._heartbeat_check())
-        ]
-
-    async def _process_retry_queue(self):
-        while not self.stopping:
+            logger.error(f"Error processing incoming message: {e}")
+            
+    def _on_publish(self, client, userdata, mid):
+        """Handle publish acknowledgment"""
+        asyncio.create_task(self._handle_publish_ack(mid))
+            
+    def _on_subscribe(self, client, userdata, mid, granted_qos):
+        """Handle subscription acknowledgment"""
+        logger.debug(f"Subscription confirmed, QoS: {granted_qos}")
+            
+    def _on_unsubscribe(self, client, userdata, mid):
+        """Handle unsubscribe acknowledgment"""
+        logger.debug("Unsubscribe confirmed")
+    
+    async def _process_incoming_message(self, message: MQTTMessage):
+        """Process an incoming message"""
+        # Add to message queue
+        await self._message_queue.put(message)
+        
+        # Call topic-specific callbacks
+        for topic, subscription in self._subscriptions.items():
+            if self._topic_matches(message.topic, topic) and subscription.callback:
+                try:
+                    if asyncio.iscoroutinefunction(subscription.callback):
+                        await subscription.callback(message)
+                    else:
+                        await asyncio.get_event_loop().run_in_executor(
+                            self._executor,
+                            subscription.callback,
+                            message
+                        )
+                except Exception as e:
+                    logger.error(f"Error in message callback: {e}")
+    
+    async def _handle_publish_ack(self, mid):
+        """Handle publish acknowledgment"""
+        # Find and remove from pending messages
+        for msg_id, message in list(self._pending_messages.items()):
+            if str(mid) == str(msg_id):
+                del self._pending_messages[msg_id]
+                
+                # Call message-specific callback if exists
+                if msg_id in self._message_callbacks:
+                    callback = self._message_callbacks.pop(msg_id)
+                    try:
+                        if asyncio.iscoroutinefunction(callback):
+                            await callback(True, message)
+                        else:
+                            await asyncio.get_event_loop().run_in_executor(
+                                self._executor,
+                                callback,
+                                True,
+                                message
+                            )
+                    except Exception as e:
+                        logger.error(f"Error in publish callback: {e}")
+                break
+    
+    async def _handle_reconnect(self):
+        """Handle reconnection logic"""
+        if self._stopping:
+            return
+            
+        await asyncio.sleep(self.config.reconnect_delay)
+        
+        max_attempts = self.config.max_reconnect_attempts
+        if max_attempts < 0 or self._reconnect_count < max_attempts:
+            self._reconnect_count += 1
+            logger.info(f"Attempting to reconnect (attempt {self._reconnect_count})")
+            
             try:
-                priority, message = await self._retry_processor.get()
+                await self.connect()
+            except Exception as e:
+                logger.error(f"Reconnection failed: {e}")
+    
+    @staticmethod
+    def _topic_matches(actual_topic: str, subscription_topic: str) -> bool:
+        """Check if an actual topic matches a subscription topic pattern
+        
+        Args:
+            actual_topic: The actual topic of the message
+            subscription_topic: The subscription topic pattern
+            
+        Returns:
+            bool: True if the topic matches the subscription
+        """
+        # Handle wildcards and multi-level wildcards
+        if subscription_topic == '#':
+            return True
+            
+        actual_parts = actual_topic.split('/')
+        subscription_parts = subscription_topic.split('/')
+        
+        # Multi-level wildcard at the end
+        if subscription_parts[-1] == '#':
+            return actual_parts[:len(subscription_parts)-1] == subscription_parts[:-1]
+        
+        if len(actual_parts) != len(subscription_parts):
+            return False
+            
+        for i, part in enumerate(subscription_parts):
+            if part != '+' and part != actual_parts[i]:
+                return False
+                
+        return True
+    
+    async def _resubscribe_to_topics(self):
+        """Resubscribe to all topics after reconnection"""
+        async with self._subscription_lock:
+            for topic, subscription in self._subscriptions.items():
+                try:
+                    result = await asyncio.get_event_loop().run_in_executor(
+                        self._executor,
+                        self._client.subscribe,
+                        topic,
+                        subscription.qos.value
+                    )
+                    
+                    if result[0] != mqtt.MQTT_ERR_SUCCESS:
+                        logger.error(f"Failed to resubscribe to {topic}")
+                except Exception as e:
+                    logger.error(f"Error resubscribing to {topic}: {e}")
+    
+    async def _start_background_tasks(self):
+        """Start background tasks"""
+        if self._tasks:
+            for task in self._tasks:
+                if not task.done():
+                    task.cancel()
+                    
+        self._tasks = [
+            asyncio.create_task(self._heartbeat_check()),
+            asyncio.create_task(self._process_retry_queue()),
+            asyncio.create_task(self._process_batch_queue())
+        ]
+    
+    async def _heartbeat_check(self):
+        """Check connection health periodically"""
+        while not self._stopping:
+            try:
+                if self._connected:
+                    await asyncio.get_event_loop().run_in_executor(
+                        self._executor,
+                        self._client.ping
+                    )
+                await asyncio.sleep(self.config.heartbeat_interval)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Heartbeat error: {e}")
+    
+    async def _process_retry_queue(self):
+        """Process message retry queue"""
+        while not self._stopping:
+            try:
+                priority, message = await self._retry_queue.get()
+                
                 if message.retry_count < self.config.retry_config.max_retries:
                     message.retry_count += 1
                     backoff = self.config.retry_config.retry_interval * (
                         self.config.retry_config.retry_backoff ** message.retry_count
                     )
                     await asyncio.sleep(backoff)
-                    await self._publish_message_async(message)
+                    await self._publish_single(message)
                 else:
-                    logger.error(
-                        f"Message {message.message_id} failed after max retries")
+                    logger.error(f"Message {message.message_id} failed after max retries")
+                    # Call callback with failure
+                    if message.message_id in self._message_callbacks:
+                        callback = self._message_callbacks.pop(message.message_id)
+                        try:
+                            if asyncio.iscoroutinefunction(callback):
+                                await callback(False, message)
+                            else:
+                                await asyncio.get_event_loop().run_in_executor(
+                                    self._executor,
+                                    callback,
+                                    False,
+                                    message
+                                )
+                        except Exception as e:
+                            logger.error(f"Error in retry callback: {e}")
+                            
+                self._retry_queue.task_done()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Retry processor error: {e}")
                 await asyncio.sleep(1)
-
-    def _process_batch(self, batch: List[MQTTMessage]):
-        """批量处理消息"""
-        for message in batch:
-            self.thread_pool.submit(self._process_single_message, message)
-
-    async def publish_async(self, message: MQTTMessage) -> bool:
-        """异步发布消息"""
-        return await asyncio.get_event_loop().run_in_executor(
-            self.thread_pool,
-            self.publish,
-            message
-        )
-
-    def _update_metrics(self, success: bool, message_size: int, processing_time: float):
-        """更新性能指标"""
-        self.metrics.publish_count += 1
-        if not success:
-            self.metrics.publish_failures += 1
-        self.metrics.message_size_total += message_size
-        self.metrics.message_processing_time += processing_time
-
-    def get_metrics(self) -> Dict:
-        """获取性能指标"""
-        current_time = time.time()
-        elapsed_time = current_time - self.metrics.last_reset
-
-        return {
-            'publish_rate': self.metrics.publish_count / elapsed_time,
-            'failure_rate': self.metrics.publish_failures / max(1, self.metrics.publish_count),
-            'average_message_size': self.metrics.message_size_total / max(1, self.metrics.publish_count),
-            'average_processing_time': self.metrics.message_processing_time / max(1, self.metrics.publish_count),
-            'retry_rate': self.metrics.retry_count / max(1, self.metrics.publish_count)
-        }
-
-    def _publish_message(self, message: MQTTMessage) -> bool:
-        """实际发布消息的内部方法"""
-        start_time = time.time()
-
+    
+    async def _process_batch_queue(self):
+        """Process message batch queue"""
+        while not self._stopping:
+            try:
+                batch = []
+                while len(batch) < self.config.batch_size:
+                    try:
+                        message = await asyncio.wait_for(
+                            self._batch_queue.get(),
+                            timeout=0.1
+                        )
+                        batch.append(message)
+                    except asyncio.TimeoutError:
+                        break
+                
+                if batch:
+                    await self._publish_batch(batch)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Batch processor error: {e}")
+                await asyncio.sleep(1)
+    
+    async def _publish_batch(self, messages: List[MQTTMessage]) -> bool:
+        """Publish a batch of messages
+        
+        Args:
+            messages: List of MQTT messages to publish
+            
+        Returns:
+            bool: True if all messages were published successfully
+        """
+        tasks = []
+        for message in messages:
+            tasks.append(self._publish_single(message))
+            
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return all(isinstance(r, bool) and r for r in results)
+    
+    @async_measure_time
+    async def _publish_single(self, message: MQTTMessage) -> bool:
+        """Publish a single message
+        
+        Args:
+            message: MQTT message to publish
+            
+        Returns:
+            bool: True if message was published successfully
+        """
+        if not self._connected:
+            await self._retry_queue.put((time.time(), message))
+            return False
+            
         try:
-            message_size = len(str(message.payload).encode('utf-8'))
-            result = self.client.publish(
+            # Use circuit breaker
+            return await self._circuit_breaker.call(self._do_publish, message)
+        except CircuitBreakerOpenError:
+            await self._retry_queue.put((time.time(), message))
+            return False
+        except Exception as e:
+            logger.error(f"Error publishing message: {e}")
+            await self._retry_queue.put((time.time(), message))
+            return False
+    
+    async def _do_publish(self, message: MQTTMessage) -> bool:
+        """Actual message publishing implementation
+        
+        Args:
+            message: MQTT message to publish
+            
+        Returns:
+            bool: True if message was published successfully
+        """
+        message_size = len(str(message.payload).encode('utf-8'))
+        start_time = time.time()
+        
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                self._client.publish,
                 message.topic,
                 message.payload,
-                qos=message.qos.value,
-                retain=message.retain
+                message.qos.value,
+                message.retain
             )
-
-            success = result.rc == mqtt.MQTT_ERR_SUCCESS
-            self._update_metrics(success, message_size,
-                                 time.time() - start_time)
-
-            if not success:
-                self.retry_queue.put((time.time(), message))
-            else:
-                self.message_cache[message.message_id] = message
-
+            
+            success = result[0] == mqtt.MQTT_ERR_SUCCESS
+            process_time = time.time() - start_time
+            
+            await self._metrics.update_async(success, message_size, process_time)
+            
+            if success:
+                self._message_cache[message.message_id] = message
+                self._pending_messages[str(result[1])] = message
+            
             return success
-
         except Exception as e:
-            logger.error(f"Error publishing message: {str(e)}")
-            self.retry_queue.put((time.time(), message))
-            return False
-
-    # ... (其他现有方法保持不变) ...
-
-    def publish_with_callback(self, message: MQTTMessage, callback: Callable = None) -> int:
-        """发布消息并设置回调"""
-        self.last_message_id += 1
-        message.message_id = self.last_message_id
-
-        if callback:
-            self.message_callbacks[message.message_id] = callback
-
-        success = self.publish(message)
-        if not success:
-            del self.message_callbacks[message.message_id]
-            raise PublishError(
-                f"Failed to publish message {message.message_id}")
-
-        return message.message_id
-
-    def subscribe_pattern(self, pattern: str, callback: Callable, qos: MQTTQoS = MQTTQoS.AT_MOST_ONCE):
-        """使用模式匹配订阅主题"""
-        if not pattern:
-            raise SubscriptionError("Invalid topic pattern")
-
-        if pattern not in self.callbacks:
-            self.callbacks[pattern] = []
-
-        self.callbacks[pattern].append(MQTTCallback(callback, [pattern]))
-        result = self.client.subscribe(pattern, qos.value)
-
-        if result[0] != mqtt.MQTT_ERR_SUCCESS:
-            raise SubscriptionError(
-                f"Failed to subscribe to pattern {pattern}")
-
-        return True
-
-
-class MQTTClient:
-    def __init__(self, config: MQTTConfig):
-        self.config = config
-        self._validate_config()
-
-        # 核心组件初始化
-        self.client = self._create_mqtt_client()
-        self._executor = ThreadPoolExecutor(max_workers=4)
-        self._cache = aiocache.Cache(ttl=300)
-        self._metrics = PerformanceMetrics()
-        self._connection_lock = asyncio.Lock()
-        self._message_queue = asyncio.Queue()
-        self._batch_queue = asyncio.Queue(maxsize=config.batch_size)
-        self._retry_queue = asyncio.PriorityQueue()
-
-        # 状态标志
-        self._stopping = False
-        self._connected = False
-        self._tasks = []
-
-        self._setup_client()
-
-    async def __aenter__(self):
-        await self.connect()
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.disconnect()
-
+            process_time = time.time() - start_time
+            await self._metrics.update_async(False, message_size, process_time)
+            raise e
+    
+    def _connect_sync(self):
+        """Synchronous connection method for the thread executor
+        
+        Raises:
+            ConnectionError: If connection fails
+        """
+        try:
+            result = self._client.connect(
+                self.config.broker,
+                self.config.port,
+                keepalive=self.config.keepalive
+            )
+            
+            if result != mqtt.MQTT_ERR_SUCCESS:
+                raise ConnectionError(f"Connection failed with code {result}")
+                
+            self._client.loop_start()
+        except Exception as e:
+            raise ConnectionError(f"Connection failed: {str(e)}")
+    
+    # Public API methods
+    
     @async_measure_time
     async def connect(self) -> bool:
+        """Connect to the MQTT broker
+        
+        Returns:
+            bool: True if connection was successful
+            
+        Raises:
+            ConnectionError: If connection fails
+        """
         async with self._connection_lock:
+            if self._connected:
+                return True
+                
             try:
-                # 使用线程执行器处理阻塞操作
                 await asyncio.get_event_loop().run_in_executor(
                     self._executor,
                     self._connect_sync
                 )
-                self._connected = True
-                self._start_background_tasks()
+                
+                # Wait for connection to be established
+                for _ in range(10):
+                    if self._connected:
+                        break
+                    await asyncio.sleep(0.5)
+                    
+                if not self._connected:
+                    raise ConnectionError("Connection timed out")
+                    
+                await self._start_background_tasks()
                 return True
             except Exception as e:
                 logger.error(f"Connection failed: {e}")
-                return False
-
+                raise ConnectionError(str(e))
+    
+    @async_measure_time
+    async def disconnect(self) -> None:
+        """Disconnect from the MQTT broker"""
+        self._stopping = True
+        
+        # Cancel background tasks
+        for task in self._tasks:
+            if not task.done():
+                task.cancel()
+        
+        # Wait for tasks to complete
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+            
+        if self._connected:
+            await asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                self._client.disconnect
+            )
+            
+        # Stop the network loop
+        await asyncio.get_event_loop().run_in_executor(
+            self._executor,
+            self._client.loop_stop
+        )
+        
+        self._connected = False
+        self._stopping = False
+    
     @async_measure_time
     async def publish(self, message: MQTTMessage) -> bool:
+        """Publish an MQTT message
+        
+        Args:
+            message: Message to publish
+            
+        Returns:
+            bool: True if message was published successfully
+            
+        Raises:
+            ConnectionError: If client is not connected
+            PublishError: If publish operation fails
+        """
         if not self._connected:
             raise ConnectionError("Client not connected")
-
+            
+        if not validate_topic(message.topic):
+            raise PublishError(f"Invalid topic: {message.topic}")
+            
         try:
-            return await self._publish_with_retry(message)
+            return await self._publish_single(message)
         except Exception as e:
             logger.error(f"Publish error: {e}")
+            raise PublishError(str(e))
+    
+    async def publish_with_callback(self, message: MQTTMessage, callback: Callable) -> str:
+        """Publish a message with a callback for completion
+        
+        Args:
+            message: Message to publish
+            callback: Function to call when publish completes (success, message)
+            
+        Returns:
+            str: Message ID
+            
+        Raises:
+            ConnectionError: If client is not connected
+            PublishError: If publish operation fails
+        """
+        message.message_id = str(uuid.uuid4())
+        self._message_callbacks[message.message_id] = callback
+        
+        success = await self.publish(message)
+        if not success:
+            del self._message_callbacks[message.message_id]
+            raise PublishError(f"Failed to publish message {message.message_id}")
+            
+        return message.message_id
+    
+    async def publish_batch(self, messages: List[MQTTMessage]) -> bool:
+        """Publish multiple messages as a batch
+        
+        Args:
+            messages: List of messages to publish
+            
+        Returns:
+            bool: True if all messages were published successfully
+        """
+        if not self._connected:
+            raise ConnectionError("Client not connected")
+            
+        return await self._publish_batch(messages)
+    
+    async def publish_async(self, message: MQTTMessage) -> bool:
+        """Queue a message for async publishing
+        
+        Args:
+            message: Message to publish
+            
+        Returns:
+            bool: True if message was queued successfully
+        """
+        if not validate_topic(message.topic):
+            raise PublishError(f"Invalid topic: {message.topic}")
+            
+        try:
+            await self._batch_queue.put(message)
+            return True
+        except Exception as e:
+            logger.error(f"Error queuing message: {e}")
             return False
-
-    async def _publish_with_retry(self, message: MQTTMessage) -> bool:
-        retries = 0
-        while retries < self.config.retry_config.max_retries:
+    
+    @async_measure_time
+    async def subscribe(self, topic: str, qos: MQTTQoS = MQTTQoS.AT_MOST_ONCE, 
+                       callback: Callable = None) -> bool:
+        """Subscribe to an MQTT topic
+        
+        Args:
+            topic: Topic to subscribe to
+            qos: Quality of Service level
+            callback: Optional callback for messages on this topic
+            
+        Returns:
+            bool: True if subscription was successful
+            
+        Raises:
+            ConnectionError: If client is not connected
+            SubscriptionError: If subscription fails
+        """
+        if not self._connected:
+            raise ConnectionError("Client not connected")
+            
+        if not validate_topic(topic):
+            raise SubscriptionError(f"Invalid topic: {topic}")
+            
+        async with self._subscription_lock:
             try:
-                success = await self._publish_single(message)
-                if success:
-                    return True
+                result = await asyncio.get_event_loop().run_in_executor(
+                    self._executor,
+                    self._client.subscribe,
+                    topic,
+                    qos.value
+                )
+                
+                if result[0] != mqtt.MQTT_ERR_SUCCESS:
+                    raise SubscriptionError(f"Subscribe failed with result code {result[0]}")
+                    
+                self._subscriptions[topic] = MQTTSubscription(
+                    topic=topic,
+                    qos=qos,
+                    callback=callback
+                )
+                
+                return True
             except Exception as e:
-                logger.warning(f"Publish attempt {retries + 1} failed: {e}")
-
-            retries += 1
-            await asyncio.sleep(self.config.retry_config.retry_interval)
-
-        return False
-
-    # ... existing code ...
+                logger.error(f"Subscribe error: {e}")
+                raise SubscriptionError(str(e))
+    
+    @async_measure_time
+    async def unsubscribe(self, topic: str) -> bool:
+        """Unsubscribe from an MQTT topic
+        
+        Args:
+            topic: Topic to unsubscribe from
+            
+        Returns:
+            bool: True if unsubscribe was successful
+            
+        Raises:
+            ConnectionError: If client is not connected
+            SubscriptionError: If unsubscribe fails
+        """
+        if not self._connected:
+            raise ConnectionError("Client not connected")
+            
+        async with self._subscription_lock:
+            try:
+                result = await asyncio.get_event_loop().run_in_executor(
+                    self._executor,
+                    self._client.unsubscribe,
+                    topic
+                )
+                
+                if result[0] != mqtt.MQTT_ERR_SUCCESS:
+                    raise SubscriptionError(f"Unsubscribe failed with result code {result[0]}")
+                    
+                if topic in self._subscriptions:
+                    del self._subscriptions[topic]
+                    
+                return True
+            except Exception as e:
+                logger.error(f"Unsubscribe error: {e}")
+                raise SubscriptionError(str(e))
+    
+    async def receive(self, timeout: float = None) -> Optional[MQTTMessage]:
+        """Receive a message from the queue
+        
+        Args:
+            timeout: Maximum time to wait for a message (None = wait forever)
+            
+        Returns:
+            Optional[MQTTMessage]: Received message or None if timeout
+            
+        Raises:
+            TimeoutError: If timeout is reached
+        """
+        try:
+            if timeout is not None:
+                return await asyncio.wait_for(self._message_queue.get(), timeout)
+            else:
+                return await self._message_queue.get()
+        except asyncio.TimeoutError:
+            raise TimeoutError("Receive operation timed out")
+        except Exception as e:
+            logger.error(f"Receive error: {e}")
+            return None
+    
+    def get_metrics(self) -> Dict:
+        """Get performance metrics
+        
+        Returns:
+            Dict: Performance metrics
+        """
+        current_time = time.time()
+        elapsed_time = current_time - self._metrics.last_reset
+        
+        return {
+            'publish_rate': self._metrics.publish_count / max(1, elapsed_time),
+            'success_rate': self._metrics.success_rate,
+            'average_message_size': self._metrics.average_message_size,
+            'average_processing_time': self._metrics.message_processing_time / max(1, self._metrics.publish_count),
+            'retry_rate': self._metrics.retry_count / max(1, self._metrics.publish_count),
+            'connection_status': 'connected' if self._connected else 'disconnected',
+            'reconnect_count': self._reconnect_count,
+            'message_queue_size': self._message_queue.qsize(),
+            'retry_queue_size': self._retry_queue.qsize(),
+            'batch_queue_size': self._batch_queue.qsize(),
+            'active_subscriptions': len(self._subscriptions)
+        }
+    
+    def reset_metrics(self) -> None:
+        """Reset performance metrics"""
+        self._metrics.reset()
+        
+    @property
+    def is_connected(self) -> bool:
+        """Check if client is connected
+        
+        Returns:
+            bool: True if connected
+        """
+        return self._connected
+        
+    @property
+    def subscriptions(self) -> List[str]:
+        """Get list of active subscriptions
+        
+        Returns:
+            List[str]: List of subscription topics
+        """
+        return list(self._subscriptions.keys())

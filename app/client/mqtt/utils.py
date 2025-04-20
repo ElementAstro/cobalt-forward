@@ -11,7 +11,7 @@ T = TypeVar('T')
 
 @lru_cache(maxsize=1000)
 def validate_topic(topic: str) -> bool:
-    """验证MQTT主题格式"""
+    """Validate MQTT topic format"""
     if not topic or len(topic) == 0:
         return False
     if len(topic) > 65535:
@@ -20,7 +20,7 @@ def validate_topic(topic: str) -> bool:
 
 
 def parse_payload(payload: Union[str, bytes]) -> Any:
-    """解析消息负载"""
+    """Parse message payload"""
     if isinstance(payload, bytes):
         try:
             payload = payload.decode('utf-8')
@@ -35,14 +35,14 @@ def parse_payload(payload: Union[str, bytes]) -> Any:
 
 
 def compress_payload(payload: Union[str, bytes]) -> bytes:
-    """压缩消息负载"""
+    """Compress message payload"""
     if isinstance(payload, str):
         payload = payload.encode('utf-8')
     return zlib.compress(payload)
 
 
 def decompress_payload(payload: bytes) -> Union[str, bytes]:
-    """解压消息负载"""
+    """Decompress message payload"""
     try:
         return zlib.decompress(payload).decode('utf-8')
     except UnicodeDecodeError:
@@ -50,7 +50,7 @@ def decompress_payload(payload: bytes) -> Union[str, bytes]:
 
 
 def measure_time(func):
-    """性能计时装饰器"""
+    """Performance timing decorator"""
     @wraps(func)
     def wrapper(*args, **kwargs):
         start = time.perf_counter()
@@ -61,8 +61,8 @@ def measure_time(func):
     return wrapper
 
 
-async def async_measure_time(func):
-    """异步性能计时装饰器"""
+def async_measure_time(func):
+    """Async performance timing decorator"""
     @wraps(func)
     async def wrapper(*args, **kwargs):
         start = time.perf_counter()
@@ -79,7 +79,7 @@ def create_ssl_config(
     keyfile: str = None,
     cert_reqs: bool = True
 ) -> Dict:
-    """创建SSL配置"""
+    """Create SSL configuration"""
     ssl_config = {}
     if ca_certs:
         ssl_config['ca_certs'] = ca_certs
@@ -92,7 +92,7 @@ def create_ssl_config(
 
 
 class CircuitBreaker:
-    """断路器实现"""
+    """Circuit breaker implementation for fault tolerance"""
 
     def __init__(self, failure_threshold: int = 5, reset_timeout: float = 60):
         self._failures = 0
@@ -103,18 +103,48 @@ class CircuitBreaker:
         self._lock = asyncio.Lock()
 
     async def call(self, func: Callable[..., Awaitable[T]], *args, **kwargs) -> T:
+        """Execute function with circuit breaker protection"""
         async with self._lock:
             if self._is_open:
                 if time.time() - self._last_failure_time >= self._reset_timeout:
+                    logger.info("Circuit breaker reset after timeout")
                     self._is_open = False
                     self._failures = 0
                 else:
+                    logger.warning("Circuit breaker is open, request rejected")
                     raise ConnectionError("Circuit breaker is open")
 
         try:
             result = await func(*args, **kwargs)
-            self._failures = 0
+            async with self._lock:
+                self._failures = 0
             return result
         except Exception as e:
             await self._handle_failure()
             raise e
+            
+    async def _handle_failure(self):
+        """Handle circuit breaker failure"""
+        async with self._lock:
+            self._failures += 1
+            self._last_failure_time = time.time()
+            
+            if self._failures >= self._threshold:
+                logger.warning(f"Circuit breaker opened after {self._failures} failures")
+                self._is_open = True
+                
+    @property
+    async def is_open(self) -> bool:
+        """Check if circuit breaker is open"""
+        async with self._lock:
+            if self._is_open and time.time() - self._last_failure_time >= self._reset_timeout:
+                self._is_open = False
+                self._failures = 0
+                return False
+            return self._is_open
+            
+    @property
+    async def failure_count(self) -> int:
+        """Get current failure count"""
+        async with self._lock:
+            return self._failures

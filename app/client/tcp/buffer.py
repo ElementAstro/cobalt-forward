@@ -6,15 +6,20 @@ from collections import deque
 
 
 class PacketBuffer:
-    """Enhanced buffer with zero-copy support"""
+    """Enhanced buffer with zero-copy support for efficient network I/O"""
 
     def __init__(self, max_size: int = 16 * 1024 * 1024):
+        """Initialize packet buffer
+        
+        Args:
+            max_size: Maximum buffer size in bytes (default 16 MB)
+        """
         self._buffer = memoryview(bytearray(max_size))
         self._read_pos = 0
         self._write_pos = 0
         self._event = asyncio.Event()
         self._lock = asyncio.Lock()
-        self._small_buffer_cache = deque(maxlen=32)  # 小缓冲区缓存，避免频繁分配
+        self._small_buffer_cache = deque(maxlen=32)  # Small buffer cache to avoid frequent allocations
         self._read_waiters = 0
         self._stats = {
             'compactions': 0,
@@ -25,19 +30,26 @@ class PacketBuffer:
         }
 
     def _get_available_space(self) -> int:
-        """获取可用空间"""
+        """Get available space in buffer"""
         return len(self._buffer) - self._write_pos
 
     def _get_used_space(self) -> int:
-        """获取已使用空间"""
+        """Get used space in buffer"""
         return self._write_pos - self._read_pos
 
     async def append(self, data: Union[bytes, bytearray, memoryview]) -> None:
-        """优化的零拷贝追加实现"""
+        """Append data to buffer with optimized zero-copy implementation
+        
+        Args:
+            data: Data to append to buffer
+            
+        Raises:
+            BufferError: If buffer overflow occurs
+        """
         self._stats['appends'] += 1
         data_len = len(data)
 
-        # 快速路径 - 如果数据很小且缓冲区有足够空间
+        # Fast path - if data is small and buffer has enough space
         if data_len < 1024 and self._get_available_space() >= data_len:
             self._buffer[self._write_pos:self._write_pos + data_len] = data
             self._write_pos += data_len
@@ -48,22 +60,22 @@ class PacketBuffer:
         async with self._lock:
             available = self._get_available_space()
             if data_len > available:
-                # 需要压缩缓冲区
+                # Need to compact buffer
                 if self._read_pos > 0:
                     self._stats['compactions'] += 1
                     remain = self._write_pos - self._read_pos
-                    # 使用内存视图进行高效复制
+                    # Use memoryview for efficient copying
                     self._buffer[0:remain] = self._buffer[self._read_pos:self._write_pos]
                     self._write_pos = remain
                     self._read_pos = 0
                     available = len(self._buffer) - self._write_pos
 
-                # 如果压缩后仍然空间不足，则报错
+                # If still not enough space after compaction, raise error
                 if data_len > available:
                     raise BufferError(
                         f"Buffer overflow: needed {data_len}, available {available}")
 
-            # 直接使用内存视图拷贝，避免中间缓冲区
+            # Direct copy using memoryview, avoiding intermediate buffers
             self._buffer[self._write_pos:self._write_pos + data_len] = data
             self._write_pos += data_len
 
@@ -71,31 +83,39 @@ class PacketBuffer:
                 self._event.set()
 
     async def read(self, size: int, timeout: float = None) -> Optional[bytes]:
-        """优化的零拷贝读取实现"""
+        """Read data from buffer with optimized zero-copy implementation
+        
+        Args:
+            size: Number of bytes to read
+            timeout: Optional timeout in seconds
+            
+        Returns:
+            Read data or None if timeout occurred
+        """
         self._stats['reads'] += 1
 
-        # 快速路径 - 已有足够数据
+        # Fast path - if enough data is already available
         if self._read_pos + size <= self._write_pos:
             result = bytes(self._buffer[self._read_pos:self._read_pos + size])
             self._read_pos += size
 
-            # 如果缓冲区已读完，重置指针
+            # Reset pointers if buffer is empty
             if self._read_pos == self._write_pos:
                 self._read_pos = self._write_pos = 0
 
             return result
 
-        # 需要等待更多数据
+        # Need to wait for more data
         try:
             self._read_waiters += 1
 
-            # 使用锁保护读取操作
+            # Use lock to protect read operation
             async with self._lock:
                 available = self._write_pos - self._read_pos
 
-                # 等待数据
+                # Wait for data
                 if available < size:
-                    self._event.clear()  # 确保事件被清除
+                    self._event.clear()  # Ensure event is cleared
 
                     if timeout is not None:
                         try:
@@ -105,10 +125,10 @@ class PacketBuffer:
                     else:
                         await self._event.wait()
 
-                # 读取可用数据
+                # Read available data
                 available = min(self._write_pos - self._read_pos, size)
 
-                # 使用缓存池来获取小缓冲区，减少内存分配
+                # Use buffer pool for small buffers to reduce memory allocations
                 if available <= 4096 and self._small_buffer_cache:
                     self._stats['cache_hits'] += 1
                     buf = self._small_buffer_cache.popleft()
@@ -119,7 +139,7 @@ class PacketBuffer:
                     result = bytes(
                         self._buffer[self._read_pos:self._read_pos + available])
 
-                    # 缓存小缓冲区以供将来使用
+                    # Cache small buffers for future use
                     if available <= 4096 and len(self._small_buffer_cache) < self._small_buffer_cache.maxlen:
                         if not self._small_buffer_cache or len(self._small_buffer_cache[-1]) < available:
                             self._small_buffer_cache.append(
@@ -127,7 +147,7 @@ class PacketBuffer:
 
                 self._read_pos += available
 
-                # 重置缓冲区，如果已读完
+                # Reset buffer if empty
                 if self._read_pos == self._write_pos:
                     self._read_pos = self._write_pos = 0
 
@@ -136,7 +156,11 @@ class PacketBuffer:
             self._read_waiters -= 1
 
     def get_stats(self) -> dict:
-        """获取缓冲区统计信息"""
+        """Get buffer statistics
+        
+        Returns:
+            Dictionary with buffer statistics
+        """
         return {
             **self._stats,
             'buffer_size': len(self._buffer),
@@ -148,7 +172,20 @@ class PacketBuffer:
         }
 
     def clear(self) -> None:
-        """清空缓冲区"""
+        """Clear buffer contents"""
         self._read_pos = 0
         self._write_pos = 0
         self._event.clear()
+        
+    async def peek(self, size: int) -> Optional[bytes]:
+        """Peek at data without removing it from buffer
+        
+        Args:
+            size: Number of bytes to peek
+            
+        Returns:
+            Peeked data or None if not enough data
+        """
+        if self._read_pos + size <= self._write_pos:
+            return bytes(self._buffer[self._read_pos:self._read_pos + size])
+        return None

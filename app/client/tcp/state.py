@@ -5,18 +5,18 @@ from typing import Dict, Any, Optional, List
 
 
 class ClientState(Enum):
-    """TCP客户端状态枚举"""
-    DISCONNECTED = auto()  # 已断开连接
-    CONNECTING = auto()    # 正在连接
-    CONNECTED = auto()     # 已连接
-    RECONNECTING = auto()  # 重新连接中
-    ERROR = auto()         # 错误状态
-    CLOSED = auto()        # 已关闭
+    """TCP client state enumeration"""
+    DISCONNECTED = auto()  # Connection is disconnected
+    CONNECTING = auto()    # Connection is being established
+    CONNECTED = auto()     # Connection is established
+    RECONNECTING = auto()  # Connection is being re-established
+    ERROR = auto()         # Error state
+    CLOSED = auto()        # Connection is closed
 
 
 @dataclass
 class ConnectionStats:
-    """连接统计信息"""
+    """Connection statistics information"""
     created_at: float = field(default_factory=time.time)
     connection_time: Optional[float] = None
     last_activity: float = field(default_factory=time.time)
@@ -26,49 +26,49 @@ class ConnectionStats:
     messages_received: int = 0
     errors: int = 0
     reconnects: int = 0
-    latency: List[float] = field(default_factory=list)  # 最近的延迟测量值（毫秒）
+    latency: List[float] = field(default_factory=list)  # Recent latency measurements (ms)
 
     def add_latency_sample(self, latency_ms: float) -> None:
-        """添加延迟样本"""
+        """Add a latency sample"""
         self.latency.append(latency_ms)
-        # 保留最近的100个样本
+        # Keep only the most recent 100 samples
         if len(self.latency) > 100:
             self.latency.pop(0)
 
     def get_avg_latency(self) -> Optional[float]:
-        """获取平均延迟"""
+        """Get average latency"""
         if not self.latency:
             return None
         return sum(self.latency) / len(self.latency)
 
     def get_max_latency(self) -> Optional[float]:
-        """获取最大延迟"""
+        """Get maximum latency"""
         if not self.latency:
             return None
         return max(self.latency)
 
     def get_min_latency(self) -> Optional[float]:
-        """获取最小延迟"""
+        """Get minimum latency"""
         if not self.latency:
             return None
         return min(self.latency)
 
     def update_activity(self) -> None:
-        """更新最近活动时间"""
+        """Update the most recent activity time"""
         self.last_activity = time.time()
 
     def get_idle_time(self) -> float:
-        """获取空闲时间（秒）"""
+        """Get idle time (seconds)"""
         return time.time() - self.last_activity
 
     def get_uptime(self) -> Optional[float]:
-        """获取连接持续时间（秒）"""
+        """Get connection uptime (seconds)"""
         if self.connection_time is None:
             return None
         return time.time() - self.connection_time
 
     def to_dict(self) -> Dict[str, Any]:
-        """将统计信息转换为字典"""
+        """Convert statistics to dictionary"""
         return {
             "created_at": self.created_at,
             "connection_time": self.connection_time,
@@ -89,7 +89,7 @@ class ConnectionStats:
 
 @dataclass
 class ClientStats:
-    """客户端全局统计信息"""
+    """Global client statistics"""
     total_connections: int = 0
     active_connections: int = 0
     failed_connections: int = 0
@@ -101,7 +101,7 @@ class ClientStats:
     start_time: float = field(default_factory=time.time)
 
     def to_dict(self) -> Dict[str, Any]:
-        """将统计信息转换为字典"""
+        """Convert statistics to dictionary"""
         return {
             "total_connections": self.total_connections,
             "active_connections": self.active_connections,

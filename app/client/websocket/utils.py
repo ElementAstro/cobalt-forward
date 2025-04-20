@@ -10,7 +10,17 @@ def create_ssl_context(
     ca_path: Optional[str] = None,
     verify_ssl: bool = True
 ) -> ssl.SSLContext:
-    """创建SSL上下文"""
+    """Create SSL context for secure WebSocket connections.
+    
+    Args:
+        cert_path: Path to certificate file
+        key_path: Path to private key file
+        ca_path: Path to CA certificate file
+        verify_ssl: Whether to verify SSL certificates
+        
+    Returns:
+        Configured SSL context
+    """
     ssl_context = ssl.create_default_context(
         purpose=ssl.Purpose.CLIENT_AUTH if cert_path else ssl.Purpose.SERVER_AUTH)
 
@@ -28,7 +38,14 @@ def create_ssl_context(
 
 
 def parse_message(message: str) -> Any:
-    """解析消息"""
+    """Parse received WebSocket message.
+    
+    Args:
+        message: Raw message received from WebSocket
+        
+    Returns:
+        Parsed message (dict, list or string)
+    """
     if not message:
         return None
 
@@ -38,12 +55,19 @@ def parse_message(message: str) -> Any:
     try:
         return json.loads(message)
     except json.JSONDecodeError:
-        logger.trace("Message is not JSON")
+        logger.trace("Message is not JSON format")
         return message
 
 
 def serialize_message(message: Any) -> str:
-    """序列化消息"""
+    """Serialize message for sending over WebSocket.
+    
+    Args:
+        message: Message to serialize (dict, list or string)
+        
+    Returns:
+        Serialized message string
+    """
     if message is None:
         return ""
 
