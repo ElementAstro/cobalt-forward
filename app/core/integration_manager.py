@@ -37,6 +37,15 @@ class ComponentRegistration:
     initialized: bool = False
 
 
+class IntegrationStatus(Enum):
+    INACTIVE = auto()     # 未激活
+    STARTING = auto()     # 启动中
+    RUNNING = auto()      # 运行中
+    STOPPING = auto()     # 停止中
+    ERROR = auto()        # 错误状态
+    RESTARTING = auto()   # 重启中
+
+
 class IntegrationManager:
     """
     集成管理器，用于协调不同组件的交互
@@ -554,3 +563,780 @@ class IntegrationManager:
 
         metrics['components'] = component_metrics
         return metrics
+
+    def register(self, integration: 'Integration') -> None:
+        """
+        注册集成服务
+        
+        Args:
+            integration: 集成服务实例
+        """
+        name = integration.name
+        
+        if name in self._integrations:
+            logger.warning(f"集成服务 {name} 已存在，将被替换")
+        
+        self._integrations[name] = integration
+        self._dependencies[name] = set()
+        
+        if name not in self._dependents:
+            self._dependents[name] = set()
+        
+        # 添加依赖关系
+        for dep in integration.dependencies:
+            self._dependencies[name].add(dep)
+            
+            if dep not in self._dependents:
+                self._dependents[dep] = set()
+            
+            self._dependents[dep].add(name)
+        
+        # 注册到服务注册表
+        self._service_registry[name] = {
+            'name': name,
+            'type': integration.__class__.__name__,
+            'status': IntegrationStatus.INACTIVE.name,
+            'metadata': integration.metadata,
+            'dependencies': list(integration.dependencies),
+            'last_updated': time.time()
+        }
+        
+        logger.info(f"注册集成服务: {name}, 类型: {integration.__class__.__name__}")
+    
+    def unregister(self, name: str) -> bool:
+        """
+        注销集成服务
+        
+        Args:
+            name: 服务名称
+            
+        Returns:
+            是否成功注销
+        """
+        if name not in self._integrations:
+            logger.warning(f"集成服务 {name} 不存在，无法注销")
+            return False
+        
+        integration = self._integrations[name]
+        
+        # 检查是否有依赖于此服务的其他服务
+        if name in self._dependents and self._dependents[name]:
+            dependent_services = ", ".join(self._dependents[name])
+            logger.error(f"无法注销服务 {name}，以下服务依赖于它: {dependent_services}")
+            return False
+        
+        # 如果服务正在运行，先停止
+        if integration.status == IntegrationStatus.RUNNING:
+            # 异步方法不能在同步方法中直接调用，因此记录警告
+            logger.warning(f"集成服务 {name} 仍在运行，建议先停止再注销")
+        
+        # 移除依赖关系
+        for dep in self._dependencies[name]:
+            self._dependents[dep].remove(name)
+        
+        # 移除健康检查任务
+        if name in self._health_check_tasks and not self._health_check_tasks[name].done():
+            self._health_check_tasks[name].cancel()
+        
+        # 从集合中移除
+        del self._integrations[name]
+        del self._dependencies[name]
+        if name in self._dependents:
+            del self._dependents[name]
+        if name in self._service_registry:
+            del self._service_registry[name]
+        if name in self._status_change_callbacks:
+            del self._status_change_callbacks[name]
+        
+        logger.info(f"注销集成服务: {name}")
+        return True
+    
+    def get(self, name: str) -> Optional['Integration']:
+        """
+        获取集成服务实例
+        
+        Args:
+            name: 服务名称
+            
+        Returns:
+            集成服务实例
+        """
+        return self._integrations.get(name)
+    
+    def get_all(self) -> Dict[str, 'Integration']:
+        """获取所有集成服务"""
+        return self._integrations.copy()
+    
+    def get_services(self) -> Dict[str, Dict[str, Any]]:
+        """获取服务注册表"""
+        return self._service_registry.copy()
+    
+    def get_service_info(self, name: str) -> Optional[Dict[str, Any]]:
+        """
+        获取服务信息
+        
+        Args:
+            name: 服务名称
+            
+        Returns:
+            服务信息字典
+        """
+        return self._service_registry.get(name)
+    
+    async def start_service(self, name: str) -> bool:
+        """
+        启动指定服务
+        
+        Args:
+            name: 服务名称
+            
+        Returns:
+            是否成功启动
+        
+        Raises:
+            ServiceNotFoundError: 服务不存在
+            IntegrationError: 启动失败
+        """
+        if name not in self._integrations:
+            logger.error(f"集成服务 {name} 不存在，无法启动")
+            raise ServiceNotFoundError(f"服务 {name} 不存在")
+        
+        integration = self._integrations[name]
+        
+        # 已经在运行，直接返回成功
+        if integration.status == IntegrationStatus.RUNNING:
+            logger.debug(f"集成服务 {name} 已经在运行中")
+            return True
+        
+        # 如果正在启动或停止中，等待完成
+        if integration.status in (IntegrationStatus.STARTING, IntegrationStatus.STOPPING):
+            logger.debug(f"集成服务 {name} 正在 {integration.status.name}，等待完成")
+            await self._wait_for_status_change(name)
+        
+        # 如果在重启中，等待完成
+        if integration.status == IntegrationStatus.RESTARTING:
+            logger.debug(f"集成服务 {name} 正在重启中，等待完成")
+            await self._wait_for_status_change(name)
+            return integration.status == IntegrationStatus.RUNNING
+        
+        # 更新状态
+        await self._update_service_status(name, IntegrationStatus.STARTING)
+        
+        try:
+            # 检查依赖
+            for dep in integration.dependencies:
+                if dep not in self._integrations:
+                    logger.error(f"集成服务 {name} 依赖的服务 {dep} 不存在")
+                    await self._update_service_status(name, IntegrationStatus.ERROR)
+                    raise IntegrationError(f"依赖服务 {dep} 不存在")
+                
+                # 如果依赖服务未运行，先启动依赖
+                dep_service = self._integrations[dep]
+                if dep_service.status != IntegrationStatus.RUNNING:
+                    logger.info(f"启动依赖服务 {dep}")
+                    success = await self.start_service(dep)
+                    if not success:
+                        logger.error(f"启动依赖服务 {dep} 失败")
+                        await self._update_service_status(name, IntegrationStatus.ERROR)
+                        raise IntegrationError(f"启动依赖服务 {dep} 失败")
+            
+            # 启动服务
+            logger.info(f"正在启动集成服务 {name}")
+            await integration.start()
+            
+            # 更新状态
+            await self._update_service_status(name, IntegrationStatus.RUNNING)
+            
+            # 启动健康检查
+            if integration.health_check_interval > 0:
+                self._start_health_check(name)
+            
+            logger.info(f"集成服务 {name} 启动成功")
+            return True
+            
+        except Exception as e:
+            logger.error(f"启动集成服务 {name} 失败: {e}")
+            await self._update_service_status(name, IntegrationStatus.ERROR)
+            raise IntegrationError(f"启动服务 {name} 失败: {e}") from e
+    
+    async def stop_service(self, name: str, force: bool = False) -> bool:
+        """
+        停止指定服务
+        
+        Args:
+            name: 服务名称
+            force: 是否强制停止，如果为True，会同时停止依赖于此服务的其他服务
+            
+        Returns:
+            是否成功停止
+            
+        Raises:
+            ServiceNotFoundError: 服务不存在
+            IntegrationError: 停止失败
+        """
+        if name not in self._integrations:
+            logger.error(f"集成服务 {name} 不存在，无法停止")
+            raise ServiceNotFoundError(f"服务 {name} 不存在")
+        
+        integration = self._integrations[name]
+        
+        # 已经停止，直接返回成功
+        if integration.status == IntegrationStatus.INACTIVE:
+            logger.debug(f"集成服务 {name} 已经处于停止状态")
+            return True
+        
+        # 如果正在启动或停止中，等待完成
+        if integration.status in (IntegrationStatus.STARTING, IntegrationStatus.STOPPING):
+            logger.debug(f"集成服务 {name} 正在 {integration.status.name}，等待完成")
+            await self._wait_for_status_change(name)
+        
+        # 如果在重启中，等待完成
+        if integration.status == IntegrationStatus.RESTARTING:
+            logger.debug(f"集成服务 {name} 正在重启中，等待完成")
+            await self._wait_for_status_change(name)
+        
+        # 检查是否有依赖于此服务的其他服务
+        dependents = self._dependents.get(name, set())
+        if dependents and not force:
+            dependent_services = ", ".join(dependents)
+            logger.error(f"无法停止服务 {name}，以下服务依赖于它: {dependent_services}")
+            raise IntegrationError(f"无法停止服务，存在依赖: {dependent_services}")
+        
+        # 如果强制停止，先停止所有依赖于此服务的服务
+        if force and dependents:
+            for dep_service in dependents:
+                logger.info(f"停止依赖于 {name} 的服务: {dep_service}")
+                try:
+                    await self.stop_service(dep_service, force=True)
+                except Exception as e:
+                    logger.error(f"停止依赖服务 {dep_service} 失败: {e}")
+                    # 继续尝试停止其他服务
+        
+        # 更新状态
+        await self._update_service_status(name, IntegrationStatus.STOPPING)
+        
+        # 停止健康检查
+        if name in self._health_check_tasks and not self._health_check_tasks[name].done():
+            self._health_check_tasks[name].cancel()
+            try:
+                await self._health_check_tasks[name]
+            except asyncio.CancelledError:
+                pass
+        
+        try:
+            # 停止服务
+            logger.info(f"正在停止集成服务 {name}")
+            await integration.stop()
+            
+            # 更新状态
+            await self._update_service_status(name, IntegrationStatus.INACTIVE)
+            
+            logger.info(f"集成服务 {name} 停止成功")
+            return True
+            
+        except Exception as e:
+            logger.error(f"停止集成服务 {name} 失败: {e}")
+            await self._update_service_status(name, IntegrationStatus.ERROR)
+            raise IntegrationError(f"停止服务 {name} 失败: {e}") from e
+    
+    async def restart_service(self, name: str) -> bool:
+        """
+        重启指定服务
+        
+        Args:
+            name: 服务名称
+            
+        Returns:
+            是否成功重启
+            
+        Raises:
+            ServiceNotFoundError: 服务不存在
+            IntegrationError: 重启失败
+        """
+        if name not in self._integrations:
+            logger.error(f"集成服务 {name} 不存在，无法重启")
+            raise ServiceNotFoundError(f"服务 {name} 不存在")
+        
+        integration = self._integrations[name]
+        
+        # 如果正在启动或停止中，等待完成
+        if integration.status in (IntegrationStatus.STARTING, IntegrationStatus.STOPPING):
+            logger.debug(f"集成服务 {name} 正在 {integration.status.name}，等待完成")
+            await self._wait_for_status_change(name)
+        
+        # 如果已经在重启中，等待完成
+        if integration.status == IntegrationStatus.RESTARTING:
+            logger.debug(f"集成服务 {name} 已经在重启中，等待完成")
+            await self._wait_for_status_change(name)
+            return integration.status == IntegrationStatus.RUNNING
+        
+        # 更新状态
+        await self._update_service_status(name, IntegrationStatus.RESTARTING)
+        
+        try:
+            logger.info(f"正在重启集成服务 {name}")
+            
+            # 如果服务正在运行，先停止
+            if integration.status == IntegrationStatus.RUNNING:
+                await integration.stop()
+            
+            # 启动服务
+            await integration.start()
+            
+            # 更新状态
+            await self._update_service_status(name, IntegrationStatus.RUNNING)
+            
+            # 重启健康检查
+            if integration.health_check_interval > 0:
+                if name in self._health_check_tasks and not self._health_check_tasks[name].done():
+                    self._health_check_tasks[name].cancel()
+                    try:
+                        await self._health_check_tasks[name]
+                    except asyncio.CancelledError:
+                        pass
+                
+                self._start_health_check(name)
+            
+            logger.info(f"集成服务 {name} 重启成功")
+            return True
+            
+        except Exception as e:
+            logger.error(f"重启集成服务 {name} 失败: {e}")
+            await self._update_service_status(name, IntegrationStatus.ERROR)
+            raise IntegrationError(f"重启服务 {name} 失败: {e}") from e
+    
+    async def start_all(self, ignore_errors: bool = False) -> Dict[str, bool]:
+        """
+        启动所有服务
+        
+        Args:
+            ignore_errors: 是否忽略单个服务启动失败的错误
+            
+        Returns:
+            服务名称 -> 是否成功启动 的字典
+        """
+        # 按依赖关系排序，确保依赖项先启动
+        ordered_services = self._order_services_by_dependencies()
+        
+        results = {}
+        for service_name in ordered_services:
+            try:
+                success = await self.start_service(service_name)
+                results[service_name] = success
+                
+                if not success and not ignore_errors:
+                    logger.error(f"启动服务 {service_name} 失败，中止启动过程")
+                    break
+                    
+            except Exception as e:
+                logger.error(f"启动服务 {service_name} 异常: {e}")
+                results[service_name] = False
+                
+                if not ignore_errors:
+                    break
+        
+        return results
+    
+    async def stop_all(self, ignore_errors: bool = False) -> Dict[str, bool]:
+        """
+        停止所有服务
+        
+        Args:
+            ignore_errors: 是否忽略单个服务停止失败的错误
+            
+        Returns:
+            服务名称 -> 是否成功停止 的字典
+        """
+        # 按依赖关系逆序，确保依赖服务最后停止
+        ordered_services = self._order_services_by_dependencies()
+        ordered_services.reverse()
+        
+        results = {}
+        for service_name in ordered_services:
+            try:
+                success = await self.stop_service(service_name, force=True)
+                results[service_name] = success
+                
+                if not success and not ignore_errors:
+                    logger.error(f"停止服务 {service_name} 失败，中止停止过程")
+                    break
+                    
+            except Exception as e:
+                logger.error(f"停止服务 {service_name} 异常: {e}")
+                results[service_name] = False
+                
+                if not ignore_errors:
+                    break
+        
+        return results
+    
+    async def check_health(self, name: str) -> bool:
+        """
+        检查服务健康状态
+        
+        Args:
+            name: 服务名称
+            
+        Returns:
+            是否健康
+            
+        Raises:
+            ServiceNotFoundError: 服务不存在
+        """
+        if name not in self._integrations:
+            logger.error(f"集成服务 {name} 不存在，无法检查健康状态")
+            raise ServiceNotFoundError(f"服务 {name} 不存在")
+        
+        integration = self._integrations[name]
+        
+        try:
+            # 如果服务不在运行状态，直接返回False
+            if integration.status != IntegrationStatus.RUNNING:
+                return False
+            
+            # 执行健康检查
+            healthy = await integration.health_check()
+            
+            # 更新服务注册表
+            self._service_registry[name]['last_health_check'] = time.time()
+            self._service_registry[name]['healthy'] = healthy
+            
+            return healthy
+            
+        except Exception as e:
+            logger.error(f"服务 {name} 健康检查异常: {e}")
+            
+            # 更新服务注册表
+            self._service_registry[name]['last_health_check'] = time.time()
+            self._service_registry[name]['healthy'] = False
+            self._service_registry[name]['last_error'] = str(e)
+            
+            return False
+    
+    async def check_all_health(self) -> Dict[str, bool]:
+        """
+        检查所有服务的健康状态
+        
+        Returns:
+            服务名称 -> 是否健康 的字典
+        """
+        results = {}
+        
+        for name in self._integrations:
+            try:
+                healthy = await self.check_health(name)
+                results[name] = healthy
+            except Exception as e:
+                logger.error(f"检查服务 {name} 健康状态异常: {e}")
+                results[name] = False
+        
+        return results
+    
+    def register_status_change_callback(self, service_name: str, callback: Callable) -> None:
+        """
+        注册状态变化回调函数
+        
+        Args:
+            service_name: 服务名称
+            callback: 回调函数，接收服务名称和新状态作为参数
+        """
+        if service_name not in self._status_change_callbacks:
+            self._status_change_callbacks[service_name] = []
+        
+        self._status_change_callbacks[service_name].append(callback)
+        logger.debug(f"为服务 {service_name} 注册状态变化回调函数")
+    
+    async def _update_service_status(self, name: str, status: IntegrationStatus) -> None:
+        """
+        更新服务状态并触发回调
+        
+        Args:
+            name: 服务名称
+            status: 新状态
+        """
+        if name not in self._integrations:
+            logger.error(f"集成服务 {name} 不存在，无法更新状态")
+            return
+        
+        integration = self._integrations[name]
+        old_status = integration.status
+        
+        # 更新状态
+        integration.status = status
+        
+        # 更新服务注册表
+        self._service_registry[name]['status'] = status.name
+        self._service_registry[name]['last_updated'] = time.time()
+        
+        logger.debug(f"更新服务 {name} 状态: {old_status.name} -> {status.name}")
+        
+        # 触发回调
+        if name in self._status_change_callbacks:
+            for callback in self._status_change_callbacks[name]:
+                try:
+                    if asyncio.iscoroutinefunction(callback):
+                        await callback(name, status)
+                    else:
+                        callback(name, status)
+                except Exception as e:
+                    logger.error(f"执行服务 {name} 状态变化回调函数异常: {e}")
+    
+    async def _wait_for_status_change(self, name: str, timeout: float = 30.0) -> None:
+        """
+        等待服务状态变化
+        
+        Args:
+            name: 服务名称
+            timeout: 超时时间（秒）
+            
+        Raises:
+            asyncio.TimeoutError: 等待超时
+        """
+        if name not in self._integrations:
+            logger.error(f"集成服务 {name} 不存在，无法等待状态变化")
+            return
+        
+        integration = self._integrations[name]
+        current_status = integration.status
+        
+        # 创建一个事件来等待状态变化
+        status_changed = asyncio.Event()
+        
+        # 定义回调函数
+        async def on_status_change(service_name: str, new_status: IntegrationStatus) -> None:
+            if service_name == name and new_status != current_status:
+                status_changed.set()
+        
+        # 注册回调
+        self.register_status_change_callback(name, on_status_change)
+        
+        try:
+            # 等待状态变化或超时
+            await asyncio.wait_for(status_changed.wait(), timeout)
+        except asyncio.TimeoutError:
+            logger.warning(f"等待服务 {name} 状态变化超时")
+            raise
+        finally:
+            # 移除回调
+            if name in self._status_change_callbacks:
+                self._status_change_callbacks[name].remove(on_status_change)
+    
+    def _start_health_check(self, name: str) -> None:
+        """
+        启动服务健康检查任务
+        
+        Args:
+            name: 服务名称
+        """
+        if name not in self._integrations:
+            logger.error(f"集成服务 {name} 不存在，无法启动健康检查")
+            return
+        
+        integration = self._integrations[name]
+        
+        # 如果已经有健康检查任务在运行，先取消
+        if name in self._health_check_tasks and not self._health_check_tasks[name].done():
+            self._health_check_tasks[name].cancel()
+        
+        # 创建健康检查任务
+        self._health_check_tasks[name] = asyncio.create_task(
+            self._health_check_loop(name, integration.health_check_interval)
+        )
+        logger.debug(f"启动服务 {name} 健康检查任务，间隔: {integration.health_check_interval}秒")
+    
+    async def _health_check_loop(self, name: str, interval: float) -> None:
+        """
+        健康检查循环
+        
+        Args:
+            name: 服务名称
+            interval: 检查间隔（秒）
+        """
+        logger.debug(f"服务 {name} 健康检查循环开始，间隔: {interval}秒")
+        
+        try:
+            while True:
+                # 执行健康检查
+                try:
+                    healthy = await self.check_health(name)
+                    
+                    # 如果服务不健康且状态为RUNNING，将状态设为ERROR
+                    if not healthy and self._integrations[name].status == IntegrationStatus.RUNNING:
+                        logger.warning(f"服务 {name} 健康检查失败，设置状态为ERROR")
+                        await self._update_service_status(name, IntegrationStatus.ERROR)
+                    
+                    # 如果服务健康且状态为ERROR，将状态恢复为RUNNING
+                    elif healthy and self._integrations[name].status == IntegrationStatus.ERROR:
+                        logger.info(f"服务 {name} 恢复健康，设置状态为RUNNING")
+                        await self._update_service_status(name, IntegrationStatus.RUNNING)
+                    
+                except Exception as e:
+                    logger.error(f"执行服务 {name} 健康检查异常: {e}")
+                
+                # 等待下一次检查
+                await asyncio.sleep(interval)
+                
+        except asyncio.CancelledError:
+            logger.debug(f"服务 {name} 健康检查任务被取消")
+            raise
+        except Exception as e:
+            logger.error(f"服务 {name} 健康检查循环异常: {e}")
+    
+    def _order_services_by_dependencies(self) -> List[str]:
+        """
+        按依赖关系对服务进行排序
+        
+        Returns:
+            排序后的服务名称列表，依赖项在前
+        """
+        # 使用拓扑排序
+        result = []
+        visited = set()
+        temp_mark = set()
+        
+        def visit(node: str) -> None:
+            # 检测循环依赖
+            if node in temp_mark:
+                # 检测到循环依赖，但不中断排序
+                logger.warning(f"检测到循环依赖: {node}")
+                return
+            
+            if node not in visited:
+                temp_mark.add(node)
+                
+                # 访问所有依赖
+                for dep in self._dependencies.get(node, set()):
+                    if dep in self._integrations:  # 只考虑已注册的服务
+                        visit(dep)
+                
+                temp_mark.remove(node)
+                visited.add(node)
+                result.append(node)
+        
+        # 对所有服务进行排序
+        for service in list(self._integrations.keys()):
+            if service not in visited:
+                visit(service)
+        
+        return result
+    
+    def import_service(self, module_path: str, class_name: str, **kwargs) -> 'Integration':
+        """
+        从模块导入并实例化服务
+        
+        Args:
+            module_path: 模块路径
+            class_name: 类名
+            **kwargs: 传递给构造函数的参数
+            
+        Returns:
+            实例化的服务
+            
+        Raises:
+            ImportError: 导入失败
+            AttributeError: 类不存在
+            Exception: 实例化失败
+        """
+        try:
+            # 导入模块
+            module = importlib.import_module(module_path)
+            
+            # 获取类
+            service_class = getattr(module, class_name)
+            
+            # 实例化
+            service = service_class(**kwargs)
+            
+            # 注册
+            self.register(service)
+            
+            return service
+            
+        except ImportError as e:
+            logger.error(f"导入模块 {module_path} 失败: {e}")
+            raise
+        except AttributeError as e:
+            logger.error(f"类 {class_name} 在模块 {module_path} 中不存在: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"实例化服务 {class_name} 失败: {e}")
+            raise
+
+
+class Integration:
+    """
+    集成服务基类
+    
+    为各种集成服务提供统一的接口和生命周期管理
+    子类必须实现start和stop方法
+    """
+    
+    def __init__(self, name: str, dependencies: List[str] = None,
+                 health_check_interval: float = 60.0, metadata: Dict[str, Any] = None):
+        """
+        初始化集成服务
+        
+        Args:
+            name: 服务名称
+            dependencies: 依赖的其他服务名称列表
+            health_check_interval: 健康检查间隔（秒），0表示不进行健康检查
+            metadata: 服务元数据
+        """
+        self.name = name
+        self.dependencies = dependencies or []
+        self.health_check_interval = health_check_interval
+        self.metadata = metadata or {}
+        self.status = IntegrationStatus.INACTIVE
+        logger.debug(f"初始化集成服务: {name}")
+    
+    async def start(self) -> None:
+        """
+        启动服务
+        
+        Raises:
+            NotImplementedError: 子类必须实现此方法
+        """
+        raise NotImplementedError("子类必须实现start方法")
+    
+    async def stop(self) -> None:
+        """
+        停止服务
+        
+        Raises:
+            NotImplementedError: 子类必须实现此方法
+        """
+        raise NotImplementedError("子类必须实现stop方法")
+    
+    async def health_check(self) -> bool:
+        """
+        健康检查
+        
+        Returns:
+            服务是否健康
+        """
+        # 默认实现，子类可以重写此方法提供实际的健康检查逻辑
+        return self.status == IntegrationStatus.RUNNING
+    
+    async def get_metrics(self) -> Dict[str, Any]:
+        """
+        获取服务指标
+        
+        Returns:
+            服务指标字典
+        """
+        # 默认实现返回基本信息，子类可以重写此方法提供更详细的指标
+        return {
+            'name': self.name,
+            'status': self.status.name,
+            'uptime': self.get_uptime(),
+        }
+    
+    def get_uptime(self) -> float:
+        """
+        获取服务运行时间（秒）
+        
+        Returns:
+            运行时间，如果服务未运行则返回0
+        """
+        # 默认实现，子类可以重写此方法提供实际的运行时间计算
+        return 0.0  # 默认实现不跟踪运行时间

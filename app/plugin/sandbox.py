@@ -8,18 +8,19 @@ import sys
 import os
 import tempfile
 import logging
-import inspect
-import threading
+# import inspect # Unused
+# import threading # Unused
 import contextlib
 import importlib
 import time
-from typing import Dict, Any, Set, List, Optional, Tuple, Callable
+from typing import Dict, Any, Set, Optional, Callable, Union, Generator, TypeVar
 import builtins
+import types # For types.ModuleType
 
 logger = logging.getLogger(__name__)
 
 # List of safe builtins that plugins are allowed to use by default
-SAFE_BUILTINS = {
+SAFE_BUILTINS: Set[str] = {
     # Basic types
     'int', 'float', 'str', 'bool', 'list', 'dict', 'set', 'tuple', 'frozenset',
     # Type functions
@@ -33,7 +34,7 @@ SAFE_BUILTINS = {
     # Collection creation
     'range',
     # Context managers
-    'contextlib',
+    # 'contextlib', # This is a module, not a builtin function usually exposed directly
     # Help
     'help', 'dir',
     # Exceptions
@@ -41,14 +42,17 @@ SAFE_BUILTINS = {
 }
 
 # Modules that should be blocked by default
-BLOCKED_MODULES = {
+BLOCKED_MODULES: Set[str] = {
     'subprocess', 'os.system', 'os.popen', 'os.spawn', 'pty',
     'socket', 'requests', 'urllib', 'ftplib',
-    'importlib', 'imp', 'sys.modules', '__import__',
+    'importlib', 'imp', 'sys.modules', # '__import__' is handled by overriding
     'pickle', 'marshal', 'shelve',
     'multiprocessing',
 }
 
+# Type variables for RestrictedDict
+_K = TypeVar('_K')
+_V = TypeVar('_V')
 
 class RestrictedImporter:
     """
@@ -67,25 +71,33 @@ class RestrictedImporter:
             blocked_modules: Set of module names that are blocked from being imported.
                 Takes precedence over allowed_modules.
         """
-        self.allowed_modules = allowed_modules or set()
-        self.blocked_modules = blocked_modules or set(BLOCKED_MODULES)
-        self._original_import = builtins.__import__
-        self._import_cache = {}
+        self.allowed_modules: Set[str] = allowed_modules or set()
+        self.blocked_modules: Set[str] = blocked_modules or set(BLOCKED_MODULES)
+        self._original_import: Callable[..., types.ModuleType] = builtins.__import__
+        self._import_cache: Dict[str, types.ModuleType] = {}
     
     def install(self) -> None:
         """Install the restricted importer"""
-        builtins.__import__ = self._restricted_import
+        builtins.__import__ = self._restricted_import # type: ignore[assignment] # Overriding builtin
     
     def uninstall(self) -> None:
         """Restore the original importer"""
         builtins.__import__ = self._original_import
+        
+    def clear_import_cache(self) -> None:
+        """Clear the import cache"""
+        self._import_cache.clear()
     
-    def _restricted_import(self, name, *args, **kwargs):
+    def _restricted_import(self, name: str, globals: Optional[Dict[str, Any]] = None, locals: Optional[Dict[str, Any]] = None, fromlist: Optional[tuple[str, ...]] = (), level: int = 0) -> types.ModuleType:
         """
         Restricted import function that checks if the module is allowed.
         
         Args:
             name: Name of module to import
+            globals: Global namespace
+            locals: Local namespace
+            fromlist: List of names to import from module
+            level: Relative import level
             
         Returns:
             Imported module if allowed
@@ -104,7 +116,8 @@ class RestrictedImporter:
             
         # Proceed with import
         try:
-            module = self._original_import(name, *args, **kwargs)
+            # Call original import with all standard arguments
+            module = self._original_import(name, globals, locals, fromlist, level)
             self._import_cache[name] = module
             return module
         except ImportError as e:
@@ -136,16 +149,13 @@ class RestrictedImporter:
                 
         # Check if specific function is blocked
         # (e.g. 'os.system' is blocked if 'os.system' is in blocked_modules)
-        if self.allowed_modules:
-            # If we have an allowed list, everything not allowed is blocked
+        # This logic seems to be for when allowed_modules is used as an allow-list
+        if self.allowed_modules: 
             if name not in self.allowed_modules:
-                parent_allowed = False
-                for allowed in self.allowed_modules:
-                    if name.startswith(allowed + '.'):
-                        parent_allowed = True
-                        break
-                if not parent_allowed:
-                    return True
+                # Check if a parent of 'name' is allowed (e.g. 'os' is allowed, so 'os.path' should be too unless explicitly blocked)
+                is_submodule_of_allowed = any(name.startswith(allowed + '.') for allowed in self.allowed_modules)
+                if not is_submodule_of_allowed:
+                    return True # Not in allowed list and not a submodule of an allowed one
                     
         return False
     
@@ -172,12 +182,13 @@ class RestrictedImporter:
             del self._import_cache[name]
 
 
-class RestrictedDict(dict):
+class RestrictedDict(Dict[_K, _V]):
     """
     Dictionary with controlled access to keys.
+    Assumes keys are strings for permission checking.
     """
     
-    def __init__(self, allowed_keys: Optional[Set[str]] = None, *args, **kwargs):
+    def __init__(self, allowed_keys: Optional[Set[str]] = None, *args: Any, **kwargs: Any):
         """
         Initialize restricted dictionary.
         
@@ -188,9 +199,9 @@ class RestrictedDict(dict):
             **kwargs: Additional keyword arguments to pass to dict constructor.
         """
         super().__init__(*args, **kwargs)
-        self.allowed_keys = allowed_keys or set()
+        self.allowed_keys: Optional[Set[str]] = allowed_keys # Store it as Optional
     
-    def __getitem__(self, key):
+    def __getitem__(self, key: _K) -> _V:
         """
         Get item with access control.
         
@@ -203,11 +214,11 @@ class RestrictedDict(dict):
         Raises:
             KeyError: If key is not allowed
         """
-        if self.allowed_keys and key not in self.allowed_keys:
+        if self.allowed_keys is not None and isinstance(key, str) and key not in self.allowed_keys:
             raise KeyError(f"Key '{key}' is not allowed in sandbox")
         return super().__getitem__(key)
     
-    def __setitem__(self, key, value):
+    def __setitem__(self, key: _K, value: _V) -> None:
         """
         Set item with access control.
         
@@ -218,11 +229,11 @@ class RestrictedDict(dict):
         Raises:
             KeyError: If key is not allowed
         """
-        if self.allowed_keys and key not in self.allowed_keys:
+        if self.allowed_keys is not None and isinstance(key, str) and key not in self.allowed_keys:
             raise KeyError(f"Key '{key}' is not allowed to be set in sandbox")
-        return super().__setitem__(key, value)
+        super().__setitem__(key, value)
     
-    def __delitem__(self, key):
+    def __delitem__(self, key: _K) -> None:
         """
         Delete item with access control.
         
@@ -232,9 +243,9 @@ class RestrictedDict(dict):
         Raises:
             KeyError: If key is not allowed
         """
-        if self.allowed_keys and key not in self.allowed_keys:
+        if self.allowed_keys is not None and isinstance(key, str) and key not in self.allowed_keys:
             raise KeyError(f"Key '{key}' is not allowed to be deleted in sandbox")
-        return super().__delitem__(key)
+        super().__delitem__(key)
 
 
 class PluginSandbox:
@@ -244,20 +255,20 @@ class PluginSandbox:
     
     def __init__(self):
         """Initialize plugin sandbox."""
-        self.importer = RestrictedImporter()
-        self.allowed_builtins = SAFE_BUILTINS.copy()
-        self._original_builtins = dict(builtins.__dict__)
-        self._restricted_globals = {}
-        self._temp_dir = None
-        self._resource_limits = {
+        self.importer: RestrictedImporter = RestrictedImporter()
+        self.allowed_builtins: Set[str] = SAFE_BUILTINS.copy()
+        self._original_builtins: Dict[str, Any] = dict(builtins.__dict__)
+        # self._restricted_globals: Dict[str, Any] = {} # This seems unused, consider removing
+        self._temp_dir: Optional[str] = None
+        self._resource_limits: Dict[str, Union[float, int]] = {
             'cpu_time': 10.0,  # CPU time in seconds
             'memory': 100 * 1024 * 1024,  # Memory limit in bytes (100MB)
             'file_size': 10 * 1024 * 1024,  # File size limit in bytes (10MB)
             'open_files': 10,  # Maximum number of open files
         }
-        self._cache = {}
+        self._cache: Dict[str, Any] = {} # Generic cache, e.g. for execution results if needed
         
-    def _setup_restricted_environment(self):
+    def _setup_restricted_environment(self) -> Dict[str, Any]:
         """
         Set up restricted execution environment.
         
@@ -265,40 +276,46 @@ class PluginSandbox:
             Dictionary of globals for the restricted environment
         """
         # Create restricted builtins
-        restricted_builtins = {}
+        restricted_builtins_dict: Dict[str, Any] = {}
         for name in self.allowed_builtins:
-            if name in builtins.__dict__:
-                restricted_builtins[name] = builtins.__dict__[name]
+            if hasattr(builtins, name): # Check if name exists in builtins module
+                restricted_builtins_dict[name] = getattr(builtins, name)
         
         # Set up globals dictionary
-        globals_dict = {
-            '__builtins__': restricted_builtins,
+        globals_dict: Dict[str, Any] = {
+            '__builtins__': restricted_builtins_dict,
             '__name__': '__plugin__',
             '__doc__': None,
             '__package__': None,
         }
         
         # Add safe modules to globals
-        for module_name in ('math', 'datetime', 'random', 'json', 're', 'functools', 'itertools'):
+        for module_name in ('math', 'datetime', 'random', 'json', 're', 'functools', 'itertools', 'time'):
             try:
+                # Use the restricted importer to load these modules for consistency
+                # Or assume these are "system-level" safe modules loaded outside restriction for the sandbox setup
                 globals_dict[module_name] = importlib.import_module(module_name)
             except ImportError:
-                pass
+                logger.warning(f"Could not import standard module {module_name} for sandbox globals.")
         
         return globals_dict
     
-    def _create_temp_dir(self):
+    def _create_temp_dir(self) -> Optional[str]:
         """
         Create temporary directory for plugin files.
         
         Returns:
-            Path to temporary directory
+            Path to temporary directory or None if error
         """
         if not self._temp_dir:
-            self._temp_dir = tempfile.mkdtemp(prefix='plugin_sandbox_')
+            try:
+                self._temp_dir = tempfile.mkdtemp(prefix='plugin_sandbox_')
+            except Exception as e:
+                logger.error(f"Failed to create temp dir for sandbox: {e}")
+                return None
         return self._temp_dir
     
-    def _cleanup_temp_dir(self):
+    def _cleanup_temp_dir(self) -> None:
         """Clean up temporary directory."""
         if self._temp_dir and os.path.exists(self._temp_dir):
             try:
@@ -309,7 +326,7 @@ class PluginSandbox:
                 logger.error(f"Error cleaning up sandbox temp dir: {e}")
     
     @contextlib.contextmanager
-    def apply(self):
+    def apply(self) -> Generator[Dict[str, Any], None, None]:
         """
         Apply sandbox restrictions and restore original state afterward.
         
@@ -317,59 +334,58 @@ class PluginSandbox:
             Dictionary of globals for the restricted environment
         """
         # Store original state
-        original_import = builtins.__import__
-        original_globals = dict(globals())
+        original_import_func = builtins.__import__
+        # original_globals = dict(globals()) # Unused variable
         original_sys_path = list(sys.path)
         
+        current_globals: Dict[str, Any] = {}
         try:
             # Set up restricted environment
-            globals_dict = self._setup_restricted_environment()
+            current_globals = self._setup_restricted_environment()
             
             # Install restricted importer
             self.importer.install()
             
             # Modify sys.path to include temp directory first
-            temp_dir = self._create_temp_dir()
-            sys.path.insert(0, temp_dir)
+            temp_dir_path = self._create_temp_dir()
+            if (temp_dir_path):
+                sys.path.insert(0, temp_dir_path)
             
             # Set resource limits (implementation varies by platform)
             self._set_resource_limits()
             
-            yield globals_dict
+            yield current_globals
             
         finally:
             # Restore original state
-            builtins.__import__ = original_import
+            builtins.__import__ = original_import_func
             sys.path = original_sys_path
+            # No need to restore globals() as it's a function call, not a modified object
     
-    def _set_resource_limits(self):
+    def _set_resource_limits(self) -> None:
         """Set resource usage limits for sandbox."""
         try:
-            import resource
+            import resource # Platform-specific
             
             # Set CPU time limit
-            resource.setrlimit(resource.RLIMIT_CPU, 
-                               (self._resource_limits['cpu_time'], 
-                                self._resource_limits['cpu_time']))
+            cpu_limit = int(self._resource_limits['cpu_time'])
+            resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit, cpu_limit)) # type: ignore[attr-defined]
             
             # Set memory limit
-            resource.setrlimit(resource.RLIMIT_AS, 
-                               (self._resource_limits['memory'], 
-                                self._resource_limits['memory']))
+            mem_limit = int(self._resource_limits['memory'])
+            resource.setrlimit(resource.RLIMIT_AS, (mem_limit, mem_limit)) # type: ignore[attr-defined]
             
             # Set file size limit
-            resource.setrlimit(resource.RLIMIT_FSIZE, 
-                               (self._resource_limits['file_size'], 
-                                self._resource_limits['file_size']))
+            fsize_limit = int(self._resource_limits['file_size'])
+            resource.setrlimit(resource.RLIMIT_FSIZE, (fsize_limit, fsize_limit)) # type: ignore[attr-defined]
             
             # Set open files limit
-            resource.setrlimit(resource.RLIMIT_NOFILE, 
-                               (self._resource_limits['open_files'], 
-                                self._resource_limits['open_files']))
+            nofile_limit = int(self._resource_limits['open_files'])
+            resource.setrlimit(resource.RLIMIT_NOFILE, (nofile_limit, nofile_limit)) # type: ignore[attr-defined]
                                 
         except (ImportError, AttributeError):
             # Resource module not available on this platform
-            logger.warning("Resource limits couldn't be set (not supported on this platform)")
+            logger.warning("Resource limits couldn't be set (module 'resource' not available or lacks 'setrlimit' on this platform)")
     
     def execute(self, code: str, globals_dict: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
@@ -383,54 +399,66 @@ class PluginSandbox:
             Dictionary containing the execution result and any new global variables
             
         Raises:
-            Exception: If code execution fails
+            Exception: If code execution fails (caught and reported in result dict)
         """
-        with self.apply() as sandbox_globals:
+        result: Dict[str, Any]
+        with self.apply() as sandbox_globals_from_context:
             # Use provided globals or the sandbox defaults
-            execution_globals = globals_dict or sandbox_globals
+            execution_globals: Dict[str, Any] = globals_dict if globals_dict is not None else sandbox_globals_from_context
             
             # Add safe executions helpers to globals
             execution_globals['print'] = self._safe_print
             
             # Track execution time
-            start_time = time.time()
+            exec_start_time = time.time()
             
             # Execute the code
             try:
                 exec(code, execution_globals)
-                execution_time = time.time() - start_time
+                exec_execution_time = time.time() - exec_start_time
                 
                 # Return result and updated globals
+                # Filter out sandbox_globals_from_context to only get user-defined vars
+                user_globals = {
+                    k: v for k, v in execution_globals.items()
+                    if k not in sandbox_globals_from_context or execution_globals[k] is not sandbox_globals_from_context.get(k)
+                }
+                # Further filter out builtins that might have been re-added if not careful
+                final_user_globals = {
+                     k: v for k,v in user_globals.items() if not (k.startswith("__") and k.endswith("__")) and k != "print"
+                }
+
+
                 result = {
                     'success': True,
-                    'execution_time': execution_time,
-                    'globals': {
-                        k: v for k, v in execution_globals.items()
-                        if k not in sandbox_globals and not k.startswith('__')
-                    }
+                    'execution_time': exec_execution_time,
+                    'globals': final_user_globals
                 }
             except Exception as e:
-                execution_time = time.time() - start_time
+                exec_execution_time = time.time() - exec_start_time
                 result = {
                     'success': False,
                     'error': str(e),
                     'error_type': type(e).__name__,
-                    'execution_time': execution_time
+                    'execution_time': exec_execution_time
                 }
             
             return result
     
-    def _safe_print(self, *args, **kwargs):
+    def _safe_print(self, *args: Any, **_kwargs: Any) -> None: # kwargs usually for sep, end, file, flush
         """Safe version of print that logs output instead of printing."""
-        output = " ".join(str(arg) for arg in args)
-        logger.info(f"[Plugin Output] {output}")
-    
-    def reset_cache(self):
+    def reset_cache(self) -> None:
         """Clear internal caches."""
         self._cache.clear()
-        self.importer._import_cache.clear()
+        # Access importer's cache through a public method
+        if hasattr(self.importer, 'clear_import_cache'):
+            self.importer.clear_import_cache()
+        """Clear internal caches."""
+        self._cache.clear()
+        if hasattr(self.importer, '_import_cache'): # Check attribute existence
+            self.importer.clear_import_cache() # Clear the import cache in the importer
     
-    def allow_module(self, module_name: str):
+    def allow_module(self, module_name: str) -> None:
         """
         Allow a module to be imported in the sandbox.
         
@@ -439,7 +467,7 @@ class PluginSandbox:
         """
         self.importer.add_allowed_module(module_name)
     
-    def block_module(self, module_name: str):
+    def block_module(self, module_name: str) -> None:
         """
         Block a module from being imported in the sandbox.
         
@@ -448,17 +476,17 @@ class PluginSandbox:
         """
         self.importer.add_blocked_module(module_name)
     
-    def allow_builtin(self, builtin_name: str):
+    def allow_builtin(self, builtin_name: str) -> None:
         """
         Allow a builtin function in the sandbox.
         
         Args:
             builtin_name: Name of builtin to allow
         """
-        if builtin_name in builtins.__dict__:
+        if hasattr(builtins, builtin_name): # Check if it's a valid builtin
             self.allowed_builtins.add(builtin_name)
     
-    def block_builtin(self, builtin_name: str):
+    def block_builtin(self, builtin_name: str) -> None:
         """
         Block a builtin function in the sandbox.
         
@@ -468,18 +496,20 @@ class PluginSandbox:
         if builtin_name in self.allowed_builtins:
             self.allowed_builtins.remove(builtin_name)
     
-    def set_resource_limit(self, resource: str, value: int):
+    def set_resource_limit(self, resource_key: str, value: Union[int, float]) -> None:
         """
         Set a resource limit for the sandbox.
         
         Args:
-            resource: Resource name ('cpu_time', 'memory', 'file_size', 'open_files')
+            resource_key: Resource name ('cpu_time', 'memory', 'file_size', 'open_files')
             value: Limit value
         """
-        if resource in self._resource_limits:
-            self._resource_limits[resource] = value
-    
-    def get_resource_limits(self) -> Dict[str, int]:
+        if resource_key in self._resource_limits:
+            self._resource_limits[resource_key] = value
+        else:
+            logger.warning(f"Attempted to set unknown resource limit: {resource_key}")
+
+    def get_resource_limits(self) -> Dict[str, Union[float, int]]:
         """
         Get current resource limits.
         
@@ -503,7 +533,7 @@ class PluginSandbox:
             'temp_dir': self._temp_dir,
         }
     
-    def execute_function(self, func: Callable, *args, **kwargs) -> Any:
+    def execute_function(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """
         Execute a function in the sandbox.
         
@@ -516,11 +546,21 @@ class PluginSandbox:
             Function result
             
         Raises:
-            Exception: If function execution fails
+            Exception: If function execution fails (propagated from the function)
         """
-        with self.apply():
+        # Note: Applying the full sandbox (import restrictions, resource limits)
+        # for every function call might be heavy.
+        # This also means the function 'func' itself must be accessible
+        # within the sandbox's restricted global/builtin environment if it relies on them.
+        # If 'func' is defined outside and passed in, it runs with its closure's scope
+        # but its *new* imports or resource usage would be sandboxed.
+        with self.apply(): # This sets up the environment for the duration of func's execution
             return func(*args, **kwargs)
     
-    def __del__(self):
+    def __del__(self) -> None:
         """Cleanup when object is deleted."""
         self._cleanup_temp_dir()
+        # Ensure importer is uninstalled if it was installed by this instance
+        # This is tricky if multiple sandboxes exist. A ref count or explicit cleanup might be better.
+        # For now, assuming one active sandbox or careful management.
+        # self.importer.uninstall() # This might be too aggressive if importer is shared or managed globally

@@ -1,4 +1,4 @@
-from typing import Dict, Any, Optional, List, Callable
+from typing import Dict, Any, Optional, List, Callable, Set, TypeVar, Union, Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime
 import time
@@ -7,33 +7,42 @@ import asyncio
 import logging
 import traceback
 
-from app.core.shared_services import SharedServices, ServiceType
+from app.core.shared_services import SharedServices
 
 logger = logging.getLogger(__name__)
 
+T = TypeVar('T')  # Define a type variable for transformations
+
+
+class MessageBus:
+    """Message Bus interface type for type checking"""
+    pass
+
+
 @dataclass
 class ComponentMetrics:
-    """组件性能指标"""
+    """Component performance metrics"""
     start_time: float = field(default_factory=time.time)
     message_count: int = 0
     error_count: int = 0
-    processing_times: List[float] = field(default_factory=list)
+    # 修复: 为List添加明确的类型注解
+    processing_times: List[float] = field(default_factory=lambda: [])
     max_history: int = 1000
 
     def record_message(self, processing_time: float):
-        """记录一次消息处理"""
+        """Record a message processing"""
         self.message_count += 1
         self.processing_times.append(processing_time)
         if len(self.processing_times) > self.max_history:
             self.processing_times.pop(0)
 
     def record_error(self):
-        """记录一次错误"""
+        """Record an error"""
         self.error_count += 1
 
     @property
     def avg_processing_time(self) -> float:
-        """计算平均处理时间"""
+        """Calculate average processing time"""
         if not self.processing_times:
             return 0.0
         return sum(self.processing_times) / len(self.processing_times)
@@ -41,29 +50,29 @@ class ComponentMetrics:
 
 class BaseComponent:
     """
-    消息系统基础组件抽象类
+    Message system base component abstract class
 
-    为所有消息系统组件提供通用接口和功能，包括:
-    - 生命周期管理（启动/停止）
-    - 指标收集
-    - 基本标识和配置
-    - 共享服务访问
-    - 错误处理
-    - 监控集成
+    Provides common interfaces and functionality for all message system components, including:
+    - Lifecycle management (start/stop)
+    - Metrics collection
+    - Basic identification and configuration
+    - Shared service access
+    - Error handling
+    - Monitoring integration
     """
 
     def __init__(self, name: Optional[str] = None):
         """
-        初始化基础组件
+        Initialize base component
 
         Args:
-            name: 组件名称，如果不提供则自动生成
+            name: Component name, automatically generated if not provided
         """
         self.id = str(uuid.uuid4())
         self.name = name or f"{self.__class__.__name__}_{self.id[:8]}"
         self._start_time = 0
         self._component_metrics = ComponentMetrics()
-        self._metrics = {
+        self._metrics: Dict[str, Any] = {
             'created_at': time.time(),
             'started_at': 0,
             'uptime': 0,
@@ -74,42 +83,44 @@ class BaseComponent:
             'processing_times': []
         }
         self._running = False
-        self._lifecycle_hooks = {
+        self._lifecycle_hooks: Dict[str, List[Callable[["BaseComponent"], Union[None, Coroutine[Any, Any, None]]]]] = {
             'before_start': [],
             'after_start': [],
             'before_stop': [],
             'after_stop': []
         }
-        self._transformers = []
+        self._transformers: List[Any] = []  # Any object with transform method
         self._shared_services = SharedServices()
-        self._message_bus = None
+        self._message_bus: Optional[MessageBus] = None
         self._last_health_check = time.time()
-        self._health_check_interval = 60  # 默认60秒检查一次
+        self._health_check_interval = 60  # Default 60 seconds
 
-    def add_lifecycle_hook(self, hook_type: str, hook: Callable) -> None:
+    def add_lifecycle_hook(self,
+                           hook_type: str,
+                           hook: Callable[["BaseComponent"], Union[None, Coroutine[Any, Any, None]]]) -> None:
         """
-        添加生命周期钩子
-        
+        Add lifecycle hook
+
         Args:
-            hook_type: 钩子类型 ('before_start', 'after_start', 'before_stop', 'after_stop')
-            hook: 钩子函数，接收组件实例作为参数
+            hook_type: Hook type ('before_start', 'after_start', 'before_stop', 'after_stop')
+            hook: Hook function, receives component instance as parameter
         """
         if hook_type in self._lifecycle_hooks:
             self._lifecycle_hooks[hook_type].append(hook)
         else:
-            raise ValueError(f"未知的生命周期钩子类型: {hook_type}")
+            raise ValueError(f"Unknown lifecycle hook type: {hook_type}")
 
-    async def set_message_bus(self, message_bus) -> None:
-        """设置消息总线引用"""
+    async def set_message_bus(self, message_bus: MessageBus) -> None:
+        """Set message bus reference"""
         self._message_bus = message_bus
 
     async def start(self) -> None:
-        """启动组件"""
+        """Start component"""
         if self._running:
-            logger.warning(f"组件 {self.name} 已经在运行中")
+            logger.warning(f"Component {self.name} is already running")
             return
 
-        # 执行启动前钩子
+        # Execute pre-start hooks
         for hook in self._lifecycle_hooks['before_start']:
             await self._execute_hook(hook)
 
@@ -118,14 +129,14 @@ class BaseComponent:
             self._running = True
             self._start_time = time.time()
             self._metrics['started_at'] = self._start_time
-            logger.info(f"组件 {self.name} 已启动")
+            logger.info(f"Component {self.name} started")
 
-            # 执行启动后钩子
+            # Execute post-start hooks
             for hook in self._lifecycle_hooks['after_start']:
                 await self._execute_hook(hook)
 
         except Exception as e:
-            logger.error(f"启动组件 {self.name} 失败: {e}")
+            logger.error(f"Failed to start component {self.name}: {e}")
             logger.debug(traceback.format_exc())
             self._metrics['last_error'] = {
                 'time': time.time(),
@@ -136,12 +147,12 @@ class BaseComponent:
             raise
 
     async def stop(self) -> None:
-        """停止组件"""
+        """Stop component"""
         if not self._running:
-            logger.warning(f"组件 {self.name} 已经停止")
+            logger.warning(f"Component {self.name} is already stopped")
             return
 
-        # 执行停止前钩子
+        # Execute pre-stop hooks
         for hook in self._lifecycle_hooks['before_stop']:
             await self._execute_hook(hook)
 
@@ -149,14 +160,14 @@ class BaseComponent:
             await self._stop_impl()
             self._running = False
             self._metrics['uptime'] += time.time() - self._start_time
-            logger.info(f"组件 {self.name} 已停止")
+            logger.info(f"Component {self.name} stopped")
 
-            # 执行停止后钩子
+            # Execute post-stop hooks
             for hook in self._lifecycle_hooks['after_stop']:
                 await self._execute_hook(hook)
 
         except Exception as e:
-            logger.error(f"停止组件 {self.name} 失败: {e}")
+            logger.error(f"Failed to stop component {self.name}: {e}")
             logger.debug(traceback.format_exc())
             self._metrics['last_error'] = {
                 'time': time.time(),
@@ -166,74 +177,78 @@ class BaseComponent:
             self._component_metrics.record_error()
             raise
 
-    async def _execute_hook(self, hook: Callable) -> None:
-        """执行生命周期钩子"""
+    async def _execute_hook(self,
+                            hook: Callable[["BaseComponent"], Union[None, Coroutine[Any, Any, None]]]) -> None:
+        """Execute lifecycle hook"""
         try:
             if asyncio.iscoroutinefunction(hook):
                 await hook(self)
             else:
                 hook(self)
         except Exception as e:
-            logger.error(f"执行钩子 {hook.__name__} 失败: {e}")
+            logger.error(f"Failed to execute hook {hook.__name__}: {e}")
             logger.debug(traceback.format_exc())
 
     async def _start_impl(self) -> None:
-        """组件启动实现 (可由子类重写)"""
+        """Component start implementation (can be overridden by subclass)"""
         pass
 
     async def _stop_impl(self) -> None:
-        """组件停止实现 (可由子类重写)"""
+        """Component stop implementation (can be overridden by subclass)"""
         pass
 
     async def handle_message(self, topic: str, data: Any) -> None:
         """
-        处理接收到的消息 (可由子类重写)
-        
+        Handle received message (can be overridden by subclass)
+
         Args:
-            topic: 消息主题
-            data: 消息数据
+            topic: Message topic
+            data: Message data
         """
+        logger.debug(
+            f"Base handle_message called with topic: {topic}, data type: {type(data)}")
         pass
 
-    def add_transformer(self, transformer: Callable) -> None:
+    def add_transformer(self, transformer: Any) -> None:
         """
-        添加数据转换器
-        
+        Add data transformer
+
         Args:
-            transformer: 转换器对象，必须实现transform方法
+            transformer: Transformer object, must implement transform method
         """
         self._transformers.append(transformer)
         self._shared_services.register_transformer(
-            f"{self.name}_{len(self._transformers)}", 
+            f"{self.name}_{len(self._transformers)}",
             transformer
         )
 
+    # 修复: 将泛型函数的TypeVar改为object类型
     async def _transform_data(self, data: Any) -> Any:
         """
-        应用所有转换器处理数据
-        
+        Apply all transformers to process data
+
         Args:
-            data: 要转换的数据
-            
+            data: Data to transform
+
         Returns:
-            转换后的数据
+            Transformed data
         """
         start_time = time.time()
         try:
-            result = data
+            result: Any = data
             for transformer in self._transformers:
                 if asyncio.iscoroutinefunction(transformer.transform):
                     result = await transformer.transform(result)
                 else:
                     result = transformer.transform(result)
-            
-            # 记录性能指标
+
+            # Record performance metrics
             processing_time = time.time() - start_time
             self._component_metrics.record_message(processing_time)
             return result
-            
+
         except Exception as e:
-            logger.error(f"转换数据失败: {e}")
+            logger.error(f"Failed to transform data: {e}")
             self._component_metrics.record_error()
             self._metrics['last_error'] = {
                 'time': time.time(),
@@ -244,32 +259,32 @@ class BaseComponent:
 
     async def check_health(self) -> Dict[str, Any]:
         """
-        检查组件健康状态
-        
+        Check component health status
+
         Returns:
-            组件健康状态信息
+            Component health status information
         """
         now = time.time()
         if now - self._last_health_check < self._health_check_interval:
-            # 返回缓存的健康状态
+            # Return cached health status
             return self._get_health_status()
 
         try:
-            # 执行实际的健康检查
+            # Perform actual health check
             await self._health_check_impl()
             self._last_health_check = now
             return self._get_health_status()
-            
+
         except Exception as e:
-            logger.error(f"健康检查失败: {e}")
+            logger.error(f"Health check failed: {e}")
             return self._get_health_status(False, str(e))
 
     async def _health_check_impl(self) -> None:
-        """健康检查实现 (可由子类重写)"""
+        """Health check implementation (can be overridden by subclass)"""
         pass
 
     def _get_health_status(self, healthy: bool = True, error: Optional[str] = None) -> Dict[str, Any]:
-        """获取健康状态信息"""
+        """Get health status information"""
         return {
             'component': self.name,
             'id': self.id,
@@ -283,41 +298,47 @@ class BaseComponent:
 
     @property
     def metrics(self) -> Dict[str, Any]:
-        """获取组件指标"""
+        """Get component metrics"""
         current_metrics = self._metrics.copy()
-        
-        # 更新当前运行时间
+
+        # Update current runtime
         if self._running:
             current_metrics['uptime'] = time.time() - self._start_time
-            
-        # 添加组件指标
+
+        # Add component metrics
         current_metrics['component_metrics'] = {
             'message_count': self._component_metrics.message_count,
             'error_count': self._component_metrics.error_count,
             'avg_processing_time': self._component_metrics.avg_processing_time
         }
-        
+
         return current_metrics
 
     def is_running(self) -> bool:
-        """检查组件是否正在运行"""
+        """Check if component is running"""
         return self._running
 
     @property
     def shared_services(self) -> SharedServices:
-        """获取共享服务实例"""
+        """Get shared services instance"""
         return self._shared_services
+
+    # 修复: 添加setter方法允许外部更新shared_services
+    @shared_services.setter
+    def shared_services(self, services: SharedServices) -> None:
+        """Set shared services instance"""
+        self._shared_services = services
 
 
 class ComponentManager:
-    """组件管理器，负责跟踪和管理所有组件的生命周期"""
+    """Component manager, responsible for tracking and managing all component lifecycles"""
 
     def __init__(self, shared_services: Optional[SharedServices] = None):
         """
-        初始化组件管理器
-        
+        Initialize component manager
+
         Args:
-            shared_services: 共享服务实例
+            shared_services: Shared services instance
         """
         self.components: Dict[str, BaseComponent] = {}
         self.shared_services = shared_services or SharedServices()
@@ -325,136 +346,138 @@ class ComponentManager:
         self._shutdown_order: List[str] = []
         self._dependencies: Dict[str, List[str]] = {}
 
-    def register_component(self, component: BaseComponent, 
+    def register_component(self, component: BaseComponent,
                            dependencies: Optional[List[str]] = None) -> None:
         """
-        注册组件
-        
+        Register component
+
         Args:
-            component: 要注册的组件
-            dependencies: 组件的依赖项列表（组件名称）
+            component: Component to register
+            dependencies: List of component dependencies (component names)
         """
         if component.name in self.components:
-            raise ValueError(f"组件 {component.name} 已注册")
-        
+            raise ValueError(f"Component {component.name} already registered")
+
         self.components[component.name] = component
-        
-        # 设置共享服务
-        component._shared_services = self.shared_services
-        
-        # 记录依赖关系
+
+        # 修复: 使用setter方法设置shared_services而不是直接访问受保护的属性
+        component.shared_services = self.shared_services
+
+        # Record dependencies
         deps = dependencies or []
         self._dependencies[component.name] = deps
-        
-        # 重新计算启动和关闭顺序
+
+        # Recalculate startup and shutdown order
         self._calculate_execution_order()
-        
-        logger.info(f"注册组件: {component.name}")
+
+        logger.info(f"Registered component: {component.name}")
 
     def _calculate_execution_order(self) -> None:
-        """计算组件的启动和关闭顺序，考虑依赖关系"""
-        # 拓扑排序
-        visited = set()
-        temp_visited = set()
-        order = []
-        
-        def visit(name):
+        """Calculate component startup and shutdown order, considering dependencies"""
+        # Topological sort
+        visited: Set[str] = set()
+        temp_visited: Set[str] = set()
+        order: List[str] = []
+
+        def visit(name: str) -> None:
             if name in temp_visited:
-                raise ValueError(f"检测到组件依赖循环: {name}")
-            
+                raise ValueError(
+                    f"Component dependency cycle detected: {name}")
+
             if name in visited:
                 return
-            
+
             temp_visited.add(name)
-            
-            # 访问依赖项
+
+            # Visit dependencies
             for dep in self._dependencies.get(name, []):
                 if dep not in self.components:
-                    logger.warning(f"组件 {name} 依赖未注册的组件 {dep}")
+                    logger.warning(
+                        f"Component {name} depends on unregistered component {dep}")
                     continue
                 visit(dep)
-            
+
             temp_visited.remove(name)
             visited.add(name)
             order.append(name)
-        
-        # 对所有组件进行拓扑排序
+
+        # Perform topological sort on all components
         for name in self.components:
             if name not in visited:
                 visit(name)
-        
+
         self._startup_order = order
         self._shutdown_order = list(reversed(order))
 
     async def start_all(self) -> None:
-        """按依赖顺序启动所有组件"""
-        logger.info("开始启动所有组件...")
-        
+        """Start all components in dependency order"""
+        logger.info("Starting all components...")
+
         for name in self._startup_order:
             component = self.components[name]
-            logger.info(f"正在启动组件: {name}")
+            logger.info(f"Starting component: {name}")
             try:
                 await component.start()
-                logger.info(f"组件 {name} 启动成功")
+                logger.info(f"Component {name} started successfully")
             except Exception as e:
-                logger.error(f"组件 {name} 启动失败: {e}")
-                # 在生产环境中可能需要决定是继续还是中断启动过程
+                logger.error(f"Component {name} failed to start: {e}")
+                # In production, might need to decide whether to continue or abort
                 raise
-                
-        logger.info("所有组件启动完成")
+
+        logger.info("All components started")
 
     async def stop_all(self) -> None:
-        """按依赖的逆序停止所有组件"""
-        logger.info("开始停止所有组件...")
-        
+        """Stop all components in reverse dependency order"""
+        logger.info("Stopping all components...")
+
         for name in self._shutdown_order:
             component = self.components[name]
-            logger.info(f"正在停止组件: {name}")
+            logger.info(f"Stopping component: {name}")
             try:
                 await component.stop()
-                logger.info(f"组件 {name} 已停止")
+                logger.info(f"Component {name} stopped")
             except Exception as e:
-                logger.error(f"停止组件 {name} 失败: {e}")
-                # 继续停止其他组件
-        
-        logger.info("所有组件已停止")
-        
+                logger.error(f"Failed to stop component {name}: {e}")
+                # Continue stopping other components
+
+        logger.info("All components stopped")
+
     def get_component(self, name: str) -> Optional[BaseComponent]:
         """
-        获取指定名称的组件
-        
+        Get component by name
+
         Args:
-            name: 组件名称
-            
+            name: Component name
+
         Returns:
-            组件实例，如果不存在则返回None
+            Component instance, or None if not found
         """
         return self.components.get(name)
-    
+
     def get_components_by_type(self, component_type: str) -> List[BaseComponent]:
         """
-        获取指定类型的所有组件
-        
+        Get all components of specified type
+
         Args:
-            component_type: 组件类型名称
-            
+            component_type: Component type name
+
         Returns:
-            符合类型的组件列表
+            List of components matching the type
         """
         return [
             component for component in self.components.values()
             if component.__class__.__name__ == component_type
         ]
-        
+
     async def check_health(self) -> Dict[str, Dict[str, Any]]:
         """
-        检查所有组件的健康状态
-        
+        Check health status of all components
+
         Returns:
-            组件名称到健康状态的映射
+            Mapping of component names to health status
         """
-        health_status = {}
-        
+        health_status: Dict[str, Dict[str, Any]] = {}
+
         for name, component in self.components.items():
             try:
                 health_status[name] = await component.check_health()
@@ -464,15 +487,15 @@ class ComponentManager:
                     'healthy': False,
                     'error': str(e)
                 }
-                
+
         return health_status
-    
+
     def get_metrics(self) -> Dict[str, Dict[str, Any]]:
         """
-        获取所有组件的性能指标
-        
+        Get performance metrics for all components
+
         Returns:
-            组件名称到指标的映射
+            Mapping of component names to metrics
         """
         return {
             name: component.metrics

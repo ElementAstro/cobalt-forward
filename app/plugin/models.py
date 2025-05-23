@@ -4,13 +4,13 @@ Plugin system models and data structures.
 This module defines the data models used by the plugin system, including
 plugin metadata, configuration schemas, and plugin states.
 """
-from enum import Enum, auto
-from typing import Dict, List, Any, Optional, Set, Union
+from enum import Enum
+from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, field
 import datetime
 import uuid
 import semver
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 
 
 class PluginState(str, Enum):
@@ -55,19 +55,23 @@ class PluginMetadata:
     website: Optional[str] = None        # Plugin website
     license: str = "Proprietary"         # License information
     category: PluginCategory = PluginCategory.OTHER  # Plugin category
-    tags: List[str] = field(default_factory=list)    # Tags for searching
-    dependencies: List[str] = field(default_factory=list)  # Required plugins
-    conflicts: List[str] = field(default_factory=list)     # Conflicting plugins
+    tags: List[str] = field(default_factory=lambda: [])    # Tags for searching
+    dependencies: List[str] = field(
+        default_factory=lambda: [])  # Required plugins
+    conflicts: List[str] = field(
+        default_factory=lambda: [])     # Conflicting plugins
     min_app_version: Optional[str] = None  # Minimum application version
     max_app_version: Optional[str] = None  # Maximum application version
-    config_schema: Dict[str, Any] = field(default_factory=dict)  # JSON schema for config
+    config_schema: Dict[str, Any] = field(
+        default_factory=lambda: {})  # JSON schema for config
     icon: Optional[str] = None           # Icon for UI
     load_priority: int = 100             # Loading priority (lower loads first)
     state: PluginState = PluginState.UNLOADED  # Current state
-    creation_date: datetime.datetime = field(default_factory=datetime.datetime.now)
+    creation_date: datetime.datetime = field(
+        default_factory=datetime.datetime.now)
     last_updated: Optional[datetime.datetime] = None
     uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
-    
+
     def __post_init__(self):
         """Validate and normalize metadata after initialization."""
         # Validate version
@@ -80,18 +84,18 @@ class PluginMetadata:
             else:
                 # Default to a basic version if parsing fails
                 self.version = "0.1.0"
-        
+
         # Normalize name
         self.name = self.name.strip().lower().replace(' ', '_')
-        
+
         # Set display name if not provided
         if not hasattr(self, 'display_name') or not self.display_name:
             self.display_name = self.name.replace('_', ' ').title()
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """
         Convert metadata to dictionary.
-        
+
         Returns:
             Dictionary of plugin metadata
         """
@@ -115,15 +119,15 @@ class PluginMetadata:
             "state": self.state.value,
             "uuid": self.uuid
         }
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'PluginMetadata':
         """
         Create metadata from dictionary.
-        
+
         Args:
             data: Dictionary of metadata values
-            
+
         Returns:
             PluginMetadata instance
         """
@@ -133,52 +137,53 @@ class PluginMetadata:
                 data["category"] = PluginCategory(data["category"])
             except ValueError:
                 data["category"] = PluginCategory.OTHER
-                
+
         # Convert string state to enum
         if "state" in data and isinstance(data["state"], str):
             try:
                 data["state"] = PluginState(data["state"])
             except ValueError:
                 data["state"] = PluginState.UNLOADED
-                
+
         # Handle datetime fields if they're strings
         for dt_field in ["creation_date", "last_updated"]:
             if dt_field in data and isinstance(data[dt_field], str):
                 try:
-                    data[dt_field] = datetime.datetime.fromisoformat(data[dt_field])
+                    data[dt_field] = datetime.datetime.fromisoformat(
+                        data[dt_field])
                 except (ValueError, TypeError):
                     if dt_field == "creation_date":
                         data[dt_field] = datetime.datetime.now()
                     else:
                         data[dt_field] = None
-        
+
         return cls(**data)
-    
+
     def is_compatible_with(self, other_version: str) -> bool:
         """
         Check if plugin is compatible with a specific version.
-        
+
         Args:
             other_version: Version to check compatibility with
-            
+
         Returns:
             True if compatible, False otherwise
         """
         try:
             app_version = semver.VersionInfo.parse(other_version)
-            
+
             # Check minimum version constraint
             if self.min_app_version:
                 min_version = semver.VersionInfo.parse(self.min_app_version)
                 if app_version < min_version:
                     return False
-                    
+
             # Check maximum version constraint
             if self.max_app_version:
                 max_version = semver.VersionInfo.parse(self.max_app_version)
                 if app_version > max_version:
                     return False
-                    
+
             return True
         except ValueError:
             # If version parsing fails, assume incompatible
@@ -193,7 +198,7 @@ class PluginConfigSchema(BaseModel):
     description: str = Field(default="", description="Schema description")
     type: str = Field(default="object", description="JSON Schema type")
     properties: Dict[str, Dict[str, Any]] = Field(
-        default_factory=dict, 
+        default_factory=dict,
         description="Properties definition"
     )
     required: List[str] = Field(
@@ -204,9 +209,9 @@ class PluginConfigSchema(BaseModel):
         default_factory=dict,
         description="Default configuration values"
     )
-    
-    class Config:
-        schema_extra = {
+
+    model_config = {
+        "json_schema_extra": {
             "example": {
                 "title": "My Plugin Config",
                 "description": "Configuration for my awesome plugin",
@@ -236,6 +241,7 @@ class PluginConfigSchema(BaseModel):
                 }
             }
         }
+    }
 
 
 class PluginManifest(BaseModel):
@@ -250,19 +256,27 @@ class PluginManifest(BaseModel):
     author: str = Field(default="Unknown", description="Plugin author")
     email: Optional[str] = Field(default=None, description="Author email")
     website: Optional[str] = Field(default=None, description="Plugin website")
-    license: str = Field(default="Proprietary", description="License information")
+    license: str = Field(default="Proprietary",
+                         description="License information")
     category: str = Field(default="other", description="Plugin category")
-    tags: List[str] = Field(default_factory=list, description="Tags for searching")
-    dependencies: List[str] = Field(default_factory=list, description="Required plugins")
-    conflicts: List[str] = Field(default_factory=list, description="Conflicting plugins")
-    min_app_version: Optional[str] = Field(default=None, description="Minimum app version")
-    max_app_version: Optional[str] = Field(default=None, description="Maximum app version")
-    config_schema: Optional[Dict[str, Any]] = Field(default=None, description="JSON schema for config")
+    tags: List[str] = Field(default_factory=list,
+                            description="Tags for searching")
+    dependencies: List[str] = Field(
+        default_factory=list, description="Required plugins")
+    conflicts: List[str] = Field(
+        default_factory=list, description="Conflicting plugins")
+    min_app_version: Optional[str] = Field(
+        default=None, description="Minimum app version")
+    max_app_version: Optional[str] = Field(
+        default=None, description="Maximum app version")
+    config_schema: Optional[Dict[str, Any]] = Field(
+        default=None, description="JSON schema for config")
     icon: Optional[str] = Field(default=None, description="Icon for UI")
-    load_priority: int = Field(default=100, description="Loading priority (lower loads first)")
-    
-    @validator('version')
-    def validate_version(cls, v):
+    load_priority: int = Field(
+        default=100, description="Loading priority (lower loads first)")
+
+    @field_validator('version')
+    def validate_version(cls, v: str) -> str:
         """Validate semantic version."""
         try:
             semver.VersionInfo.parse(v)
@@ -271,20 +285,20 @@ class PluginManifest(BaseModel):
             if v.count('.') == 1:
                 return f"{v}.0"
             raise ValueError("Invalid semantic version")
-    
-    @validator('category')
-    def validate_category(cls, v):
+
+    @field_validator('category')
+    def validate_category(cls, v: str) -> str:
         """Validate plugin category."""
         try:
             PluginCategory(v)
             return v
         except ValueError:
             return "other"
-    
+
     def to_metadata(self) -> PluginMetadata:
         """
         Convert manifest to plugin metadata.
-        
+
         Returns:
             PluginMetadata instance
         """
@@ -293,7 +307,7 @@ class PluginManifest(BaseModel):
             category = PluginCategory(self.category)
         except ValueError:
             category = PluginCategory.OTHER
-            
+
         return PluginMetadata(
             name=self.name,
             display_name=self.display_name,
@@ -314,9 +328,9 @@ class PluginManifest(BaseModel):
             load_priority=self.load_priority,
             state=PluginState.UNLOADED
         )
-    
-    class Config:
-        schema_extra = {
+
+    model_config = {
+        "json_schema_extra": {
             "example": {
                 "name": "my_awesome_plugin",
                 "display_name": "My Awesome Plugin",
@@ -336,21 +350,25 @@ class PluginManifest(BaseModel):
                 "load_priority": 50
             }
         }
+    }
 
 
 class PluginHealth(BaseModel):
     """
     Plugin health status.
     """
-    status: str = Field(..., description="Health status (healthy, warning, error)")
+    status: str = Field(...,
+                        description="Health status (healthy, warning, error)")
     plugin: str = Field(..., description="Plugin name")
     version: str = Field(..., description="Plugin version")
     message: Optional[str] = Field(default=None, description="Status message")
-    details: Dict[str, Any] = Field(default_factory=dict, description="Detailed status information")
-    timestamp: datetime.datetime = Field(default_factory=datetime.datetime.now, description="Status timestamp")
-    
-    class Config:
-        schema_extra = {
+    details: Dict[str, Any] = Field(
+        default_factory=dict, description="Detailed status information")
+    timestamp: datetime.datetime = Field(
+        default_factory=datetime.datetime.now, description="Status timestamp")
+
+    model_config = {
+        "json_schema_extra": {
             "example": {
                 "status": "healthy",
                 "plugin": "example_plugin",
@@ -364,3 +382,4 @@ class PluginHealth(BaseModel):
                 "timestamp": "2025-02-15T12:30:45.123456"
             }
         }
+    }

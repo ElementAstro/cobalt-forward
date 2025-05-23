@@ -1,17 +1,22 @@
 import time
 from fastapi import APIRouter, Depends, HTTPException, Query, Body, Path, status
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Callable, TypeVar, Awaitable, cast
 import logging
 import asyncio
 from datetime import datetime
 
 from .plugin_manager import PluginManager
 from .event import EventBus
+from .base import Plugin
+from .models import PluginMetadata
 
 logger = logging.getLogger(__name__)
 
 # Create API router
 router = APIRouter(prefix="/api/plugins", tags=["plugins"])
+
+# Define EventCallback if not already defined elsewhere or imported
+EventCallback = Callable[..., Awaitable[None]]
 
 
 def get_plugin_manager() -> PluginManager:
@@ -25,8 +30,8 @@ def get_plugin_manager() -> PluginManager:
         HTTPException: If the plugin manager is not initialized
     """
     from app.server import app
-    if not hasattr(app.state, "plugin_manager"):
-        logger.error("Plugin manager not initialized in app state")
+    if not hasattr(app.state, "plugin_manager") or not isinstance(app.state.plugin_manager, PluginManager):
+        logger.error("Plugin manager not initialized in app state or is of wrong type")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
             detail="Plugin manager not initialized"
@@ -45,8 +50,8 @@ def get_event_bus() -> EventBus:
         HTTPException: If the event bus is not initialized
     """
     from app.server import app
-    if not hasattr(app.state, "event_bus"):
-        logger.error("Event bus not initialized in app state")
+    if not hasattr(app.state, "event_bus") or not isinstance(app.state.event_bus, EventBus):
+        logger.error("Event bus not initialized in app state or is of wrong type")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
             detail="Event bus not initialized"
@@ -94,7 +99,9 @@ async def get_plugin_info(
     """
     logger.debug(f"API request: Get info for plugin '{plugin_name}'")
     
-    plugin_status = manager.get_plugin_status().get(plugin_name)
+    plugin_status_all: Dict[str, Dict[str, Any]] = manager.get_plugin_status()
+    plugin_status: Optional[Dict[str, Any]] = plugin_status_all.get(plugin_name)
+
     if not plugin_status:
         logger.warning(f"API request failed: Plugin '{plugin_name}' not found")
         raise HTTPException(
@@ -102,12 +109,10 @@ async def get_plugin_info(
             detail=f"Plugin '{plugin_name}' not found"
         )
     
-    # Get API schema if available
-    api_schema = manager.get_plugin_api_schema(plugin_name)
+    api_schema: Optional[Dict[str, Any]] = manager.get_plugin_api_schema(plugin_name)
     if api_schema:
         plugin_status["api"] = api_schema
     
-    # Get plugin errors
     plugin_status["errors"] = manager.get_plugin_errors(plugin_name)
     
     return plugin_status
@@ -140,7 +145,7 @@ async def reload_plugin(
             detail=f"Plugin '{plugin_name}' not found"
         )
     
-    success = await manager.reload_plugin(plugin_name)
+    success: bool = await manager.reload_plugin(plugin_name)
     
     if not success:
         logger.error(f"Failed to reload plugin '{plugin_name}'")
@@ -184,13 +189,13 @@ async def enable_plugin(
             detail=f"Plugin '{plugin_name}' not found"
         )
     
-    success = await manager.enable_plugin(plugin_name)
+    success: bool = await manager.enable_plugin(plugin_name)
     
     if not success:
         logger.warning(f"Plugin '{plugin_name}' already enabled or could not be enabled")
         return {
             "status": "info",
-            "message": f"Plugin '{plugin_name}' was already enabled",
+            "message": f"Plugin '{plugin_name}' was already enabled or operation had no effect.",
             "timestamp": datetime.now().isoformat()
         }
     
@@ -229,13 +234,13 @@ async def disable_plugin(
             detail=f"Plugin '{plugin_name}' not found"
         )
     
-    success = await manager.disable_plugin(plugin_name)
+    success: bool = await manager.disable_plugin(plugin_name)
     
     if not success:
         logger.warning(f"Plugin '{plugin_name}' already disabled or could not be disabled")
         return {
             "status": "info",
-            "message": f"Plugin '{plugin_name}' was already disabled",
+            "message": f"Plugin '{plugin_name}' was already disabled or operation had no effect.",
             "timestamp": datetime.now().isoformat()
         }
     
@@ -279,10 +284,9 @@ async def call_plugin_function(
         )
     
     try:
-        result = await manager.call_plugin_function(plugin_name, function_name, **params)
+        result: Any = await manager.call_plugin_function(plugin_name, function_name, **params)
         logger.info(f"Successfully called function '{function_name}' for plugin '{plugin_name}'")
         
-        # Wrap the result in a response
         return {
             "status": "success",
             "plugin": plugin_name,
@@ -291,26 +295,14 @@ async def call_plugin_function(
             "timestamp": datetime.now().isoformat()
         }
     except ValueError as e:
-        # Function not found
-        logger.warning(f"API request failed: Function '{function_name}' not found in plugin '{plugin_name}'")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e)
-        )
+        logger.warning(f"API request failed: Function '{function_name}' not found in plugin '{plugin_name}': {e}")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except PermissionError as e:
-        # Permission error
-        logger.warning(f"API request failed: Permission denied for function '{function_name}' in plugin '{plugin_name}'")
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=str(e)
-        )
+        logger.warning(f"API request failed: Permission denied for function '{function_name}' in plugin '{plugin_name}': {e}")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except Exception as e:
-        # Other errors
-        logger.error(f"API request failed: Error calling function '{function_name}' for plugin '{plugin_name}': {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error calling function: {str(e)}"
-        )
+        logger.error(f"API request failed: Error calling function '{function_name}' for plugin '{plugin_name}': {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error calling function: {str(e)}")
 
 
 @router.get("/{plugin_name}/config")
@@ -321,7 +313,7 @@ async def get_plugin_config(
     """Get the configuration of a plugin"""
     if plugin_name not in manager.plugin_configs:
         raise HTTPException(
-            status_code=404, detail=f"Plugin {plugin_name} has no configuration")
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Plugin {plugin_name} has no configuration or not found")
             
     return manager.plugin_configs.get(plugin_name, {})
 
@@ -335,23 +327,23 @@ async def update_plugin_config(
     """Update the configuration of a plugin"""
     if plugin_name not in manager.plugin_modules:
         raise HTTPException(
-            status_code=404, detail=f"Plugin {plugin_name} not found")
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Plugin {plugin_name} not found")
             
-    # Save the configuration
-    success = await manager._save_plugin_config(plugin_name, config)
-    if not success:
+    success_save: bool = await manager._save_plugin_config(plugin_name, config)
+    if not success_save:
         raise HTTPException(
-            status_code=500, detail=f"Failed to save configuration for plugin {plugin_name}")
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to save configuration for plugin {plugin_name}")
             
-    # If plugin is loaded, update its configuration
     if plugin_name in manager.plugins:
-        result = await manager.plugins[plugin_name].on_config_change(config)
-        if not result:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Plugin {plugin_name} rejected the configuration"
-            )
-            
+        plugin_instance = manager.plugins[plugin_name]
+        if hasattr(plugin_instance, 'on_config_change') and callable(plugin_instance.on_config_change):
+            config_accepted: bool = await plugin_instance.on_config_change(config)
+            if not config_accepted:
+                logger.warning(f"Plugin {plugin_name} rejected the configuration, but it was saved.")
+        else:
+            logger.info(f"Plugin {plugin_name} does not have an on_config_change method.")
+
+
     return {
         "status": "success",
         "message": f"Configuration for plugin {plugin_name} updated successfully"
@@ -385,16 +377,15 @@ async def get_plugin_permissions(
             detail=f"Plugin '{plugin_name}' not found"
         )
     
-    # Get direct permissions
-    direct_permissions = manager.plugin_permissions.get(plugin_name, set())
+    from .permissions import PluginPermission
+
+    direct_permissions: Set[str] = manager.permission_manager._plugin_permissions.get(plugin_name, set())
     
-    # Get all permissions (including implied)
-    all_permissions = set()
-    for perm in direct_permissions:
-        from .permissions import PluginPermission
-        all_permissions.add(perm)
-        all_permissions.update(PluginPermission.get_implied_permissions(perm))
-    
+    all_permissions: Set[str] = set()
+    for perm_str in direct_permissions:
+        all_permissions.add(perm_str)
+        all_permissions.update(PluginPermission.get_implied_permissions(perm_str))
+
     return {
         "plugin": plugin_name,
         "direct_permissions": list(direct_permissions),
@@ -407,7 +398,7 @@ async def get_plugin_permissions(
 async def manage_plugin_permission(
     plugin_name: str = Path(..., description="Name of the plugin"),
     permission: str = Path(..., description="Permission to manage"),
-    action: str = Query(..., description="Action to take", regex="^(grant|revoke)$"),
+    action: str = Query(..., description="Action to take", pattern="^(grant|revoke)$"),
     manager: PluginManager = Depends(get_plugin_manager)
 ) -> Dict[str, Any]:
     """
@@ -434,7 +425,6 @@ async def manage_plugin_permission(
             detail=f"Plugin '{plugin_name}' not found"
         )
     
-    # Validate permission
     from .permissions import PluginPermission
     if permission not in PluginPermission.ALL:
         logger.warning(f"API request failed: Unknown permission '{permission}'")
@@ -443,20 +433,19 @@ async def manage_plugin_permission(
             detail=f"Unknown permission: {permission}"
         )
     
-    # Apply action
-    success = False
+    success_action: bool = False
     if action == "grant":
-        success = await manager.grant_permission(plugin_name, permission)
-    else:  # action == "revoke"
-        success = await manager.revoke_permission(plugin_name, permission)
+        success_action = await manager.grant_permission(plugin_name, permission)
+    else:
+        success_action = await manager.revoke_permission(plugin_name, permission)
     
-    if not success:
-        logger.error(f"Failed to {action} '{permission}' for plugin '{plugin_name}'")
+    if not success_action:
+        logger.info(f"Could not {action} '{permission}' for plugin '{plugin_name}' (possibly already in desired state or failed).")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to {action} permission"
+            detail=f"Failed to {action} permission or permission was already in the desired state."
         )
-    
+
     logger.info(f"Successfully {action}ed '{permission}' permission for plugin '{plugin_name}'")
     return {
         "status": "success",
@@ -472,13 +461,12 @@ async def revoke_plugin_permission(
     manager: PluginManager = Depends(get_plugin_manager)
 ) -> Dict[str, Any]:
     """Revoke a permission from a plugin"""
-    if plugin_name not in manager.plugin_permissions:
+    if plugin_name not in manager.permission_manager._plugin_permissions:
         raise HTTPException(
-            status_code=404, detail=f"Plugin {plugin_name} not found")
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Plugin {plugin_name} not found in permission records")
             
-    # Revoke permission
-    success = await manager.revoke_permission(plugin_name, permission)
-    if success:
+    success_revoke: bool = await manager.revoke_permission(plugin_name, permission)
+    if success_revoke:
         return {
             "status": "success",
             "message": f"Permission {permission} revoked from plugin {plugin_name}"
@@ -486,7 +474,7 @@ async def revoke_plugin_permission(
     else:
         return {
             "status": "info",
-            "message": f"Plugin {plugin_name} does not have permission {permission}"
+            "message": f"Plugin {plugin_name} does not have permission {permission}, or revocation failed."
         }
 
 
@@ -534,11 +522,11 @@ async def emit_event(
     Raises:
         HTTPException: If event emission fails
     """
-    logger.info(f"API request: Emit event '{event_name}'")
+    logger.info(f"API request: Emit event '{event_name}' from source '{source}'")
     
-    success = await event_bus.emit(event_name, data, source)
+    success_emit: bool = await event_bus.emit(event_name, data, source)
     
-    if success:
+    if success_emit:
         logger.info(f"Successfully emitted event '{event_name}'")
         return {
             "status": "success",
@@ -554,14 +542,14 @@ async def emit_event(
 
 
 @router.get("/errors")
-async def get_plugin_errors(
+async def get_plugin_errors_endpoint(
     plugin_name: Optional[str] = Query(None, description="Plugin name"),
-    limit: int = Query(50, description="Error limit"),
+    limit: int = Query(50, description="Error limit", ge=1),
     manager: PluginManager = Depends(get_plugin_manager)
 ) -> List[Dict[str, Any]]:
     """Get error logs for plugins"""
-    errors = manager.get_plugin_errors(plugin_name)
-    return errors[:limit]
+    errors_list: List[Dict[str, Any]] = manager.get_plugin_errors(plugin_name)
+    return errors_list[:limit]
 
 
 @router.get("/stats")
@@ -569,22 +557,32 @@ async def get_plugin_system_stats(
     manager: PluginManager = Depends(get_plugin_manager)
 ) -> Dict[str, Any]:
     """Get statistics about the plugin system"""
-    system_status = manager.get_system_status()
-    plugin_statuses = manager.get_plugin_status()
+    system_status_val: Dict[str, Any] = manager.get_system_status()
+    plugin_statuses_val: Dict[str, Dict[str, Any]] = manager.get_plugin_status()
     
-    # Collect plugin metrics
-    metrics = {}
-    for plugin_name, plugin in manager.plugins.items():
-        if hasattr(plugin, '_metrics') and hasattr(plugin._metrics, 'get_metrics_summary'):
-            metrics[plugin_name] = plugin._metrics.get_metrics_summary()
+    metrics: Dict[str, Any] = {}
+    for plugin_name_iter, plugin_instance in manager.plugins.items():
+        if hasattr(plugin_instance, '_metrics') and plugin_instance._metrics and \
+           hasattr(plugin_instance._metrics, 'get_metrics_summary') and \
+           callable(plugin_instance._metrics.get_metrics_summary):
+            try:
+                metrics[plugin_name_iter] = plugin_instance._metrics.get_metrics_summary()
+            except Exception as e:
+                logger.error(f"Failed to get metrics for plugin {plugin_name_iter}: {e}")
+                metrics[plugin_name_iter] = {"error": "Failed to retrieve metrics"}
     
+    active_plugins_count = len([
+        p for p, s_val in plugin_statuses_val.items() if isinstance(s_val, dict) and s_val.get("state") == "ACTIVE"
+    ])
+    error_plugins_count = len([
+        p for p, s_val in plugin_statuses_val.items() if isinstance(s_val, dict) and s_val.get("state") == "ERROR"
+    ])
+
     return {
-        "system": system_status,
-        "plugin_count": len(plugin_statuses),
-        "active_plugins": len([p for p, status in plugin_statuses.items() 
-                              if status.get("state") == "ACTIVE"]),
-        "error_plugins": len([p for p, status in plugin_statuses.items() 
-                             if status.get("state") == "ERROR"]),
+        "system": system_status_val,
+        "plugin_count": len(plugin_statuses_val),
+        "active_plugins": active_plugins_count,
+        "error_plugins": error_plugins_count,
         "disabled_plugins": len(manager.disabled_plugins),
         "metrics": metrics
     }
@@ -610,8 +608,9 @@ from .event import EventCallback
 logger = logging.getLogger(__name__)
 
 # Type variables for better type hinting
-T = TypeVar('T')
-R = TypeVar('R')
+_T = TypeVar('_T')
+_R = TypeVar('_R')
+_FuncType = TypeVar('_FuncType', bound=Callable[..., Any])
 
 
 class PluginAPI:
@@ -652,33 +651,22 @@ class PluginAPI:
                 logger.warning(f"Function registry not available for plugin {self._plugin_name}")
                 return False
                 
-            # Default to function name if not provided
-            if name is None:
-                name = func.__name__
+            func_name = name or func.__name__
+            func_desc = description or inspect.getdoc(func) or f"Function {func_name} from plugin {self._plugin_name}"
                 
-            # Default description from function docstring
-            if description is None and func.__doc__:
-                description = inspect.getdoc(func)
-                
-            # Register with the function registry
-            result = await self._plugin._plugin_manager.function_registry.register_function(
-                self._plugin_name,
-                func,
-                name,
-                description or f"Function {name} from plugin {self._plugin_name}"
+            result: bool = await self._plugin._plugin_manager.function_registry.register_function(
+                self._plugin_name, func, func_name, func_desc
             )
-            
             return result
-            
         except Exception as e:
-            logger.error(f"Error registering function {name} for plugin {self._plugin_name}: {e}")
+            logger.error(f"Error registering function {name or func.__name__} for plugin {self._plugin_name}: {e}", exc_info=True)
             return False
             
     async def call_function(self, 
                            plugin_name: str, 
                            function_name: str, 
-                           *args, 
-                           **kwargs) -> Any:
+                           *args: Any, 
+                           **kwargs: Any) -> Any:
         """
         Call a function from another plugin.
         
@@ -698,18 +686,12 @@ class PluginAPI:
         if not self._plugin._plugin_manager or not self._plugin._plugin_manager.function_registry:
             raise RuntimeError(f"Function registry not available for plugin {self._plugin_name}")
             
-        # Check if plugin exists
         if not self._plugin._plugin_manager.get_plugin(plugin_name):
             raise ValueError(f"Plugin {plugin_name} not found or not loaded")
             
-        # Call function through registry
-        result = await self._plugin._plugin_manager.function_registry.call_function(
-            plugin_name,
-            function_name,
-            *args,
-            **kwargs
+        result: Any = await self._plugin._plugin_manager.function_registry.call_function(
+            plugin_name, function_name, *args, **kwargs
         )
-        
         return result
     
     async def get_all_functions(self) -> Dict[str, Dict[str, Any]]:
@@ -722,7 +704,6 @@ class PluginAPI:
         if not self._plugin._plugin_manager or not self._plugin._plugin_manager.function_registry:
             logger.warning(f"Function registry not available for plugin {self._plugin_name}")
             return {}
-            
         return await self._plugin._plugin_manager.function_registry.get_all_functions()
     
     async def get_plugin_functions(self, plugin_name: str) -> Dict[str, Any]:
@@ -741,12 +722,10 @@ class PluginAPI:
         if not self._plugin._plugin_manager or not self._plugin._plugin_manager.function_registry:
             raise RuntimeError(f"Function registry not available for plugin {self._plugin_name}")
             
-        # Check if plugin exists
         if not self._plugin._plugin_manager.get_plugin(plugin_name):
             raise ValueError(f"Plugin {plugin_name} not found or not loaded")
-            
-        functions = await self._plugin._plugin_manager.function_registry.get_plugin_functions(plugin_name)
-        return functions
+        functions_map: Dict[str, Any] = await self._plugin._plugin_manager.function_registry.get_plugin_functions(plugin_name)
+        return functions_map
     
     async def subscribe_to_event(self, 
                                 event_name: str, 
@@ -765,8 +744,7 @@ class PluginAPI:
             logger.warning(f"Event bus not available for plugin {self._plugin_name}")
             return False
             
-        # Add to plugin's event handlers dict for tracking
-        if not hasattr(self._plugin, '_event_handlers'):
+        if not hasattr(self._plugin, '_event_handlers') or self._plugin._event_handlers is None:
             self._plugin._event_handlers = {}
             
         if event_name not in self._plugin._event_handlers:
@@ -774,13 +752,7 @@ class PluginAPI:
             
         self._plugin._event_handlers[event_name].append(callback)
         
-        # Subscribe to event bus
-        self._plugin._event_bus.subscribe(
-            event_name,
-            callback,
-            self._plugin_name
-        )
-        
+        self._plugin._event_bus.subscribe(event_name, callback, self._plugin_name)
         logger.debug(f"Plugin {self._plugin_name} subscribed to event: {event_name}")
         return True
     
@@ -801,26 +773,21 @@ class PluginAPI:
             logger.warning(f"Event bus not available for plugin {self._plugin_name}")
             return False
             
-        if not hasattr(self._plugin, '_event_handlers') or event_name not in self._plugin._event_handlers:
-            logger.warning(f"Plugin {self._plugin_name} is not subscribed to event: {event_name}")
+        if not hasattr(self._plugin, '_event_handlers') or not self._plugin._event_handlers or \
+           event_name not in self._plugin._event_handlers:
+            logger.warning(f"Plugin {self._plugin_name} is not subscribed to event: {event_name} or no handlers found.")
             return False
             
-        # Unsubscribe specific callback or all callbacks
         if callback is not None:
-            # Remove specific callback
             if callback in self._plugin._event_handlers[event_name]:
                 self._plugin._event_handlers[event_name].remove(callback)
                 self._plugin._event_bus.unsubscribe(event_name, callback)
                 return True
             return False
         else:
-            # Remove all callbacks for this event
-            for cb in self._plugin._event_handlers[event_name]:
-                self._plugin._event_bus.unsubscribe(event_name, cb)
-                
-            # Clear event handlers list
+            for cb_item in self._plugin._event_handlers[event_name]:
+                self._plugin._event_bus.unsubscribe(event_name, cb_item)
             self._plugin._event_handlers[event_name] = []
-            
             return True
     
     async def emit_event(self, 
@@ -840,18 +807,16 @@ class PluginAPI:
             logger.warning(f"Event bus not available for plugin {self._plugin_name}")
             return False
             
-        # Add source plugin to data
+        event_data: Dict[str, Any]
         if isinstance(data, dict):
-            event_data = dict(data)  # Make a copy
+            event_data = data.copy()
             event_data["source_plugin"] = self._plugin_name
+        elif data is not None:
+            event_data = {"data": data, "source_plugin": self._plugin_name}
         else:
-            event_data = {
-                "data": data,
-                "source_plugin": self._plugin_name
-            }
+            event_data = {"source_plugin": self._plugin_name}
             
-        # Emit event
-        await self._plugin._event_bus.emit(event_name, event_data)
+        await self._plugin._event_bus.emit(event_name, event_data, self._plugin_name)
         return True
     
     async def get_plugin_info(self, plugin_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -868,27 +833,22 @@ class PluginAPI:
             logger.warning(f"Plugin manager not available for plugin {self._plugin_name}")
             return None
             
-        # Default to current plugin
         target_name = plugin_name or self._plugin_name
         
-        # Get plugin metadata
-        metadata = self._plugin._plugin_manager.get_plugin_metadata(target_name)
-        if not metadata:
+        metadata_val: Optional[PluginMetadata] = self._plugin._plugin_manager.get_plugin_metadata(target_name)
+        if not metadata_val:
             return None
             
-        # Get plugin status
-        status = self._plugin._plugin_manager.get_plugin_status(target_name)
+        status_val: Optional[Dict[str, Any]] = self._plugin._plugin_manager.get_plugin_status(target_name)
         
-        # Combine info
-        info = {
+        info_dict: Dict[str, Any] = {
             "name": target_name,
-            "metadata": metadata.to_dict() if metadata else {},
-            "status": status,
+            "metadata": metadata_val.to_dict() if metadata_val else {},
+            "status": status_val,
             "dependencies": self._plugin._plugin_manager.get_plugin_dependencies(target_name),
             "dependents": self._plugin._plugin_manager.get_plugin_dependents(target_name)
         }
-        
-        return info
+        return info_dict
     
     async def get_all_plugins(self) -> List[str]:
         """
@@ -900,7 +860,6 @@ class PluginAPI:
         if not self._plugin._plugin_manager:
             logger.warning(f"Plugin manager not available for plugin {self._plugin_name}")
             return []
-            
         return self._plugin._plugin_manager.get_all_plugins()
     
     async def get_loaded_plugins(self) -> List[str]:
@@ -913,7 +872,6 @@ class PluginAPI:
         if not self._plugin._plugin_manager:
             logger.warning(f"Plugin manager not available for plugin {self._plugin_name}")
             return []
-            
         return self._plugin._plugin_manager.get_loaded_plugins()
     
     async def send_message(self, 
@@ -932,11 +890,8 @@ class PluginAPI:
         if not self._plugin._plugin_manager:
             logger.warning(f"Plugin manager not available for plugin {self._plugin_name}")
             return False
-            
         return await self._plugin._plugin_manager.send_plugin_message(
-            self._plugin_name,
-            target_plugin,
-            message
+            self._plugin_name, target_plugin, message
         )
     
     def log_debug(self, message: str) -> None:
@@ -988,7 +943,6 @@ class PluginAPI:
         if not self._plugin._plugin_manager:
             logger.warning(f"Plugin manager not available for plugin {self._plugin_name}")
             return None
-            
         return self._plugin._plugin_manager.get_shared_resource(name)
     
     async def register_shared_resource(self, name: str, resource: Any) -> bool:
@@ -1005,10 +959,7 @@ class PluginAPI:
         if not self._plugin._plugin_manager:
             logger.warning(f"Plugin manager not available for plugin {self._plugin_name}")
             return False
-            
-        # Prefix resource name with plugin name to avoid conflicts
         resource_name = f"{self._plugin_name}.{name}"
-        
         self._plugin._plugin_manager.register_shared_resource(resource_name, resource)
         return True
     
@@ -1025,10 +976,7 @@ class PluginAPI:
         if not self._plugin._plugin_manager:
             logger.warning(f"Plugin manager not available for plugin {self._plugin_name}")
             return False
-            
-        # Prefix resource name with plugin name to avoid conflicts
         resource_name = f"{self._plugin_name}.{name}"
-        
         return self._plugin._plugin_manager.unregister_shared_resource(resource_name)
     
     async def get_all_shared_resources(self) -> Dict[str, Any]:
@@ -1041,7 +989,6 @@ class PluginAPI:
         if not self._plugin._plugin_manager:
             logger.warning(f"Plugin manager not available for plugin {self._plugin_name}")
             return {}
-            
         return self._plugin._plugin_manager.get_all_shared_resources()
     
     async def check_permission(self, permission: str) -> bool:
@@ -1058,10 +1005,8 @@ class PluginAPI:
             not self._plugin._plugin_manager.permission_manager):
             logger.warning(f"Permission manager not available for plugin {self._plugin_name}")
             return False
-            
-        return self._plugin._plugin_manager.permission_manager.check_permission(
-            self._plugin_name,
-            permission
+        return self._plugin._plugin_manager.permission_manager.has_permission(
+            self._plugin_name, permission
         )
     
     async def get_permissions(self) -> List[str]:
@@ -1075,11 +1020,11 @@ class PluginAPI:
             not self._plugin._plugin_manager.permission_manager):
             logger.warning(f"Permission manager not available for plugin {self._plugin_name}")
             return []
-            
-        return self._plugin._plugin_manager.permission_manager.get_permissions(
+        permissions_set: Set[str] = self._plugin._plugin_manager.permission_manager.get_plugin_permissions(
             self._plugin_name
         )
-    
+        return list(permissions_set)
+
     async def get_config(self) -> Dict[str, Any]:
         """
         Get plugin configuration.
@@ -1090,7 +1035,6 @@ class PluginAPI:
         if not self._plugin._plugin_manager:
             logger.warning(f"Plugin manager not available for plugin {self._plugin_name}")
             return {}
-            
         return self._plugin._plugin_manager.get_plugin_config(self._plugin_name)
     
     async def update_config(self, config: Dict[str, Any]) -> bool:
@@ -1106,17 +1050,13 @@ class PluginAPI:
         if not self._plugin._plugin_manager:
             logger.warning(f"Plugin manager not available for plugin {self._plugin_name}")
             return False
-            
-        # Merge with existing config
-        current_config = self._plugin._plugin_manager.get_plugin_config(self._plugin_name)
-        merged_config = {**current_config, **config}
-        
+        current_config: Dict[str, Any] = self._plugin._plugin_manager.get_plugin_config(self._plugin_name)
+        merged_config: Dict[str, Any] = {**current_config, **config}
         return await self._plugin._plugin_manager.update_plugin_config(
-            self._plugin_name,
-            merged_config
+            self._plugin_name, merged_config
         )
     
-    def measure_time(self, func: Callable[..., T]) -> Callable[..., T]:
+    def measure_time(self, func: _FuncType) -> _FuncType:
         """
         Decorator to measure execution time of a function.
         
@@ -1127,7 +1067,7 @@ class PluginAPI:
             Decorated function
         """
         @functools.wraps(func)
-        def sync_wrapper(*args, **kwargs):
+        def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
             start_time = time.time()
             result = func(*args, **kwargs)
             execution_time = time.time() - start_time
@@ -1135,20 +1075,22 @@ class PluginAPI:
             return result
             
         @functools.wraps(func)
-        async def async_wrapper(*args, **kwargs):
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
             start_time = time.time()
-            result = await func(*args, **kwargs)
+            if asyncio.iscoroutinefunction(func):
+                result = await func(*args, **kwargs)
+            else:
+                result = func(*args, **kwargs)
             execution_time = time.time() - start_time
             self.log_debug(f"Function {func.__name__} executed in {execution_time:.4f}s")
             return result
             
-        # Return appropriate wrapper based on function type
         if asyncio.iscoroutinefunction(func):
-            return async_wrapper
+            return cast(_FuncType, async_wrapper)
         else:
-            return sync_wrapper
+            return cast(_FuncType, sync_wrapper)
     
-    def register_function_decorator(self, name: Optional[str] = None, description: Optional[str] = None):
+    def register_function_decorator(self, name: Optional[str] = None, description: Optional[str] = None) -> Callable[[_FuncType], _FuncType]:
         """
         Decorator to register a function with the plugin system.
         
@@ -1159,20 +1101,14 @@ class PluginAPI:
         Returns:
             Decorator function
         """
-        def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-            # Register function
+        def decorator(func: _FuncType) -> _FuncType:
             asyncio.create_task(
-                self.register_function(
-                    func,
-                    name or func.__name__,
-                    description
-                )
+                self.register_function(func, name or func.__name__, description)
             )
             return func
-            
         return decorator
     
-    def event_handler(self, event_name: str):
+    def event_handler(self, event_name: str) -> Callable[[EventCallback], EventCallback]:
         """
         Decorator to register an event handler.
         
@@ -1182,16 +1118,14 @@ class PluginAPI:
         Returns:
             Decorator function
         """
-        def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-            # Register event handler
+        def decorator(func: EventCallback) -> EventCallback:
             asyncio.create_task(
                 self.subscribe_to_event(event_name, func)
             )
             return func
-            
         return decorator
     
-    def permission_required(self, permission: str):
+    def permission_required(self, permission: str) -> Callable[[_FuncType], _FuncType]:
         """
         Decorator to check if plugin has required permission before executing a function.
         
@@ -1201,56 +1135,50 @@ class PluginAPI:
         Returns:
             Decorator function
         """
-        def decorator(func):
+        def decorator(func: _FuncType) -> _FuncType:
             @functools.wraps(func)
-            async def async_wrapper(*args, **kwargs):
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
                 if not await self.check_permission(permission):
-                    raise PermissionError(
-                        f"Plugin {self._plugin_name} does not have permission: {permission}"
-                    )
-                return await func(*args, **kwargs)
+                    raise PermissionError(f"Plugin {self._plugin_name} does not have permission: {permission}")
+                if asyncio.iscoroutinefunction(func):
+                    return await func(*args, **kwargs)
+                else:
+                    return func(*args, **kwargs) 
                 
             @functools.wraps(func)
-            def sync_wrapper(*args, **kwargs):
-                # Create a temporary event loop if needed
-                if not asyncio.get_event_loop().is_running():
-                    loop = asyncio.new_event_loop()
-                    has_permission = loop.run_until_complete(self.check_permission(permission))
-                    loop.close()
-                else:
+            def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+                has_permission_val: bool
+                try:
+                    loop = asyncio.get_running_loop()
                     future = asyncio.create_task(self.check_permission(permission))
-                    has_permission = asyncio.get_event_loop().run_until_complete(future)
+                    has_permission_val = loop.run_until_complete(future) 
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    has_permission_val = loop.run_until_complete(self.check_permission(permission))
+                    loop.close()
                     
-                if not has_permission:
-                    raise PermissionError(
-                        f"Plugin {self._plugin_name} does not have permission: {permission}"
-                    )
+                if not has_permission_val:
+                    raise PermissionError(f"Plugin {self._plugin_name} does not have permission: {permission}")
                 return func(*args, **kwargs)
                 
-            # Return appropriate wrapper based on function type
             if asyncio.iscoroutinefunction(func):
-                return async_wrapper
+                return cast(_FuncType, async_wrapper)
             else:
-                return sync_wrapper
-                
+                return cast(_FuncType, sync_wrapper)
         return decorator
 
-
-# API errors
 class PluginAPIError(Exception):
     """Base class for plugin API errors."""
     pass
-
 
 class PluginNotFoundError(PluginAPIError):
     """Exception raised when a plugin is not found."""
     pass
 
-
 class FunctionNotFoundError(PluginAPIError):
     """Exception raised when a function is not found."""
     pass
-
 
 class PermissionDeniedError(PluginAPIError):
     """Exception raised when a plugin does not have permission for an operation."""

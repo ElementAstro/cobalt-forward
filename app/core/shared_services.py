@@ -1,412 +1,477 @@
 from functools import wraps
-from typing import Any, Dict, Optional, Callable, List, Set
-import asyncio
-import time
-import logging
+from typing import Any, Dict, Optional, Callable, List, Set, TypeVar, Generic
 from enum import Enum, auto
-from dataclasses import dataclass, field
-from datetime import datetime
+import logging
+import time
+import asyncio
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
+T = TypeVar('T')
 
 class ServiceType(Enum):
     """共享服务类型枚举"""
     MESSAGE_BUS = auto()
     EVENT_BUS = auto()
-    CONFIG_MANAGER = auto()
     COMMAND_DISPATCHER = auto()
     PLUGIN_MANAGER = auto()
-    PROTOCOL_CONVERTER = auto()
-    STORAGE = auto()
-    SECURITY = auto()
+    CONFIG_MANAGER = auto()
     TRANSFORMER = auto()
-    LOGGER = auto()
+    PROTOCOL_CONVERTER = auto()
+    SSH_FORWARDER = auto()
+    UPLOAD_MANAGER = auto()
+    STREAM_HANDLER = auto()
+    HTTP_CLIENT = auto()
+    DATABASE = auto()
+    CACHE = auto()
+    CUSTOM = auto()
 
 
-@dataclass
-class ServiceMetrics:
-    """服务指标"""
-    start_time: float = field(default_factory=time.time)
-    call_count: int = 0
-    error_count: int = 0
-    processing_times: List[float] = field(default_factory=list)
-    last_call_time: Optional[float] = None
-    max_history: int = 1000
-
-    def record_call(self, processing_time: float):
-        """记录调用"""
-        self.call_count += 1
-        self.last_call_time = time.time()
-        self.processing_times.append(processing_time)
-        if len(self.processing_times) > self.max_history:
-            self.processing_times.pop(0)
-
-    def record_error(self):
-        """记录错误"""
-        self.error_count += 1
-
-    @property
-    def avg_processing_time(self) -> float:
-        """获取平均处理时间"""
-        return sum(self.processing_times) / len(self.processing_times) if self.processing_times else 0.0
-
-
-class ServiceNotFoundException(Exception):
-    """服务未找到异常"""
-    pass
+class ServiceProvider(Generic[T]):
+    """服务提供者，封装对一种服务的访问"""
+    
+    def __init__(self, service_type: ServiceType, service: T):
+        """
+        初始化服务提供者
+        
+        Args:
+            service_type: 服务类型
+            service: 服务实例
+        """
+        self.service_type = service_type
+        self.service = service
+        self.created_at = time.time()
+        self.last_accessed = time.time()
+        self.access_count = 0
+    
+    def access(self) -> T:
+        """
+        访问服务，更新访问计数和时间
+        
+        Returns:
+            服务实例
+        """
+        self.last_accessed = time.time()
+        self.access_count += 1
+        return self.service
 
 
-class ServiceRegistrationException(Exception):
-    """服务注册异常"""
-    pass
-
-
-class DependencyResolutionException(Exception):
-    """依赖解析异常"""
-    pass
+class ServiceRegistry:
+    """服务注册表，管理系统中的服务实例"""
+    
+    def __init__(self):
+        """初始化服务注册表"""
+        self._services: Dict[str, ServiceProvider] = {}
+        self._service_by_type: Dict[ServiceType, Dict[str, str]] = defaultdict(dict)
+        self._hooks: Dict[str, List[Callable]] = defaultdict(list)
+    
+    def register(self, name: str, service: Any, service_type: ServiceType) -> None:
+        """
+        注册服务
+        
+        Args:
+            name: 服务名称
+            service: 服务实例
+            service_type: 服务类型
+        """
+        if name in self._services:
+            logger.warning(f"服务 '{name}' 已存在，将被覆盖")
+        
+        provider = ServiceProvider(service_type, service)
+        self._services[name] = provider
+        self._service_by_type[service_type][name] = name
+        
+        # 触发注册钩子
+        for hook in self._hooks.get('register', []):
+            try:
+                hook(name, service, service_type)
+            except Exception as e:
+                logger.error(f"执行注册钩子时出错: {e}")
+        
+        logger.info(f"注册服务: {name} ({service_type.name})")
+    
+    def unregister(self, name: str) -> bool:
+        """
+        注销服务
+        
+        Args:
+            name: 服务名称
+            
+        Returns:
+            是否成功注销
+        """
+        if name not in self._services:
+            return False
+        
+        service_type = self._services[name].service_type
+        
+        # 从类型映射中移除
+        if name in self._service_by_type[service_type]:
+            del self._service_by_type[service_type][name]
+        
+        # 从服务列表中移除
+        del self._services[name]
+        
+        # 触发注销钩子
+        for hook in self._hooks.get('unregister', []):
+            try:
+                hook(name, service_type)
+            except Exception as e:
+                logger.error(f"执行注销钩子时出错: {e}")
+        
+        logger.info(f"注销服务: {name}")
+        return True
+    
+    def get(self, name: str) -> Optional[Any]:
+        """
+        获取服务实例
+        
+        Args:
+            name: 服务名称
+            
+        Returns:
+            服务实例，不存在则返回None
+        """
+        if name not in self._services:
+            return None
+        
+        return self._services[name].access()
+    
+    def get_by_type(self, service_type: ServiceType) -> Dict[str, Any]:
+        """
+        获取指定类型的所有服务
+        
+        Args:
+            service_type: 服务类型
+            
+        Returns:
+            服务名称到实例的映射
+        """
+        return {
+            name: self._services[service_id].access()
+            for name, service_id in self._service_by_type[service_type].items()
+            if service_id in self._services
+        }
+    
+    def exists(self, name: str) -> bool:
+        """
+        检查服务是否存在
+        
+        Args:
+            name: 服务名称
+            
+        Returns:
+            服务是否存在
+        """
+        return name in self._services
+    
+    def add_hook(self, event: str, hook: Callable) -> None:
+        """
+        添加服务事件钩子
+        
+        Args:
+            event: 事件名称 ('register', 'unregister')
+            hook: 钩子函数
+        """
+        self._hooks[event].append(hook)
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """
+        获取服务注册表统计信息
+        
+        Returns:
+            统计信息
+        """
+        stats = {
+            'total_services': len(self._services),
+            'services_by_type': {
+                service_type.name: len(services)
+                for service_type, services in self._service_by_type.items()
+            },
+            'service_access': {
+                name: {
+                    'access_count': provider.access_count,
+                    'last_accessed': provider.last_accessed,
+                    'uptime': time.time() - provider.created_at
+                }
+                for name, provider in self._services.items()
+            }
+        }
+        return stats
 
 
 class SharedServices:
-    """
-    共享服务注册表和依赖注入管理器
-
-    允许组件注册自己为服务提供者，并解析对其他服务的依赖。
-    支持异步初始化和服务生命周期管理。
-    """
-
+    """共享服务容器，为组件提供对共享服务的访问"""
+    
     def __init__(self):
-        """初始化共享服务管理器"""
-        self._services: Dict[ServiceType, Dict[str, Any]] = {
-            service_type: {} for service_type in ServiceType
-        }
-        self._dependencies: Dict[str, Set[str]] = {}
-        self._initialized: Dict[str, bool] = {}
-        self._lock = asyncio.Lock()
-        self._observers: Dict[ServiceType, List[Callable]] = {
-            service_type: [] for service_type in ServiceType
-        }
-        self._default_services: Dict[ServiceType, str] = {}
+        """初始化共享服务容器"""
+        self._registry = ServiceRegistry()
         self._transformers: Dict[str, Any] = {}
-
-    async def register_service(self, service_type: ServiceType, name: str,
-                               service: Any, make_default: bool = False) -> None:
+        self._converters: Dict[str, Any] = {}
+        self._dependencies: Dict[str, Set[str]] = defaultdict(set)
+        self._message_bus = None
+        self._event_bus = None
+        self._command_dispatcher = None
+    
+    def register_service(self, name: str, service: Any, service_type: ServiceType) -> None:
         """
-        注册服务到共享服务管理器
-
+        注册服务
+        
         Args:
-            service_type: 服务类型
-            name: 服务名称（唯一标识符）
+            name: 服务名称
             service: 服务实例
-            make_default: 是否将此服务设为默认服务
-
-        Raises:
-            ServiceRegistrationException: 如果同名服务已存在
+            service_type: 服务类型
         """
-        async with self._lock:
-            if name in self._services[service_type]:
-                raise ServiceRegistrationException(
-                    f"服务 '{name}' (类型: {service_type.name}) 已存在")
-
-            self._services[service_type][name] = service
-            self._initialized[name] = False
-            logger.debug(f"注册服务: {name} (类型: {service_type.name})")
-
-            if make_default or name not in self._default_services.get(service_type, {}):
-                self._default_services[service_type] = name
-                logger.debug(f"设置默认 {service_type.name} 服务: {name}")
-
-            # 通知观察者
-            for observer in self._observers[service_type]:
-                if asyncio.iscoroutinefunction(observer):
-                    await observer(name, service)
-                else:
-                    observer(name, service)
-
-    async def get_service(self, service_type: ServiceType, name: Optional[str] = None) -> Any:
+        self._registry.register(name, service, service_type)
+    
+    def unregister_service(self, name: str) -> bool:
+        """
+        注销服务
+        
+        Args:
+            name: 服务名称
+            
+        Returns:
+            是否成功注销
+        """
+        return self._registry.unregister(name)
+    
+    def get_service(self, name: str) -> Optional[Any]:
         """
         获取服务实例
-
+        
+        Args:
+            name: 服务名称
+            
+        Returns:
+            服务实例，不存在则返回None
+        """
+        return self._registry.get(name)
+    
+    def get_services_by_type(self, service_type: ServiceType) -> Dict[str, Any]:
+        """
+        获取指定类型的所有服务
+        
         Args:
             service_type: 服务类型
-            name: 服务名称（如果为None，返回默认服务）
-
+            
         Returns:
-            服务实例
-
-        Raises:
-            ServiceNotFoundException: 如果服务未找到
+            服务名称到实例的映射
         """
-        if name is None:
-            name = self._default_services.get(service_type)
-            if name is None:
-                raise ServiceNotFoundException(f"没有默认的 {service_type.name} 服务")
-
-        if name not in self._services[service_type]:
-            raise ServiceNotFoundException(
-                f"服务 '{name}' (类型: {service_type.name}) 未找到")
-
-        return self._services[service_type][name]
-
-    def register_dependency(self, service_name: str, depends_on: str) -> None:
-        """
-        注册服务依赖
-
-        Args:
-            service_name: 依赖方服务名称
-            depends_on: 被依赖的服务名称
-        """
-        if service_name not in self._dependencies:
-            self._dependencies[service_name] = set()
-
-        self._dependencies[service_name].add(depends_on)
-        logger.debug(f"注册依赖: {service_name} -> {depends_on}")
-
-    async def initialize_services(self) -> None:
-        """
-        初始化所有服务，确保按依赖顺序初始化
-
-        Raises:
-            DependencyResolutionException: 如果无法解析依赖关系
-        """
-        # 构建初始化顺序
-        init_order = self._build_initialization_order()
-
-        # 按顺序初始化服务
-        for service_name in init_order:
-            for service_type in ServiceType:
-                if service_name in self._services[service_type]:
-                    service = self._services[service_type][service_name]
-                    await self._initialize_service(service_name, service)
-                    break
-
-        logger.info("所有服务初始化完成")
-
-    async def _initialize_service(self, service_name: str, service: Any) -> None:
-        """初始化单个服务"""
-        if self._initialized.get(service_name, False):
-            return
-
-        logger.debug(f"初始化服务: {service_name}")
-
-        # 如果服务有初始化方法，调用它
-        if hasattr(service, "initialize") and callable(service.initialize):
-            try:
-                if asyncio.iscoroutinefunction(service.initialize):
-                    await service.initialize()
-                else:
-                    service.initialize()
-                self._initialized[service_name] = True
-                logger.debug(f"服务 {service_name} 初始化完成")
-            except Exception as e:
-                logger.error(f"初始化服务 {service_name} 时出错: {e}")
-                raise
-        else:
-            # 没有初始化方法的服务视为已初始化
-            self._initialized[service_name] = True
-            logger.debug(f"服务 {service_name} 无需初始化")
-
-    def _build_initialization_order(self) -> List[str]:
-        """
-        构建服务初始化顺序，使用拓扑排序解析依赖
-
-        Returns:
-            服务名称列表，按初始化顺序排序
-
-        Raises:
-            DependencyResolutionException: 如果存在循环依赖
-        """
-        # 收集所有服务名称
-        all_services = set()
-        for service_type in ServiceType:
-            all_services.update(self._services[service_type].keys())
-
-        # 检查所有依赖是否存在
-        for service, deps in self._dependencies.items():
-            for dep in deps:
-                if dep not in all_services:
-                    raise DependencyResolutionException(
-                        f"服务 {service} 依赖不存在的服务 {dep}")
-
-        # 初始化访问状态
-        visited = set()
-        temp_visited = set()
-        order = []
-
-        # 拓扑排序
-        def visit(service):
-            if service in temp_visited:
-                raise DependencyResolutionException(
-                    f"检测到循环依赖，涉及服务: {service}")
-
-            if service in visited:
-                return
-
-            temp_visited.add(service)
-
-            # 访问此服务的所有依赖
-            for dep in self._dependencies.get(service, set()):
-                visit(dep)
-
-            temp_visited.remove(service)
-            visited.add(service)
-            order.append(service)
-
-        # 对所有服务执行拓扑排序
-        for service in all_services:
-            if service not in visited:
-                visit(service)
-
-        # 确保所有服务都被包含
-        for service in all_services:
-            if service not in order:
-                order.append(service)
-
-        return order
-
-    def add_observer(self, service_type: ServiceType, observer: Callable) -> None:
-        """
-        添加服务观察者，在注册新服务时得到通知
-
-        Args:
-            service_type: 服务类型
-            observer: 观察者函数，需接受服务名称和服务实例两个参数
-        """
-        self._observers[service_type].append(observer)
-
-    def remove_observer(self, service_type: ServiceType, observer: Callable) -> bool:
-        """
-        移除服务观察者
-
-        Args:
-            service_type: 服务类型
-            observer: 要移除的观察者函数
-
-        Returns:
-            是否成功移除
-        """
-        if observer in self._observers[service_type]:
-            self._observers[service_type].remove(observer)
-            return True
-        return False
-
+        return self._registry.get_by_type(service_type)
+    
     def register_transformer(self, name: str, transformer: Any) -> None:
         """
-        注册数据转换器
-
+        注册转换器
+        
         Args:
             name: 转换器名称
-            transformer: 转换器对象，必须有transform方法
+            transformer: 转换器实例
         """
-        if not hasattr(transformer, 'transform') or not callable(getattr(transformer, 'transform')):
-            raise ServiceRegistrationException("转换器必须有transform方法")
-
         self._transformers[name] = transformer
-        logger.debug(f"注册转换器: {name}")
-
-    async def transform_data(self, data: Any) -> Any:
+        self._registry.register(f"transformer:{name}", transformer, ServiceType.TRANSFORMER)
+    
+    def get_transformer(self, name: str) -> Optional[Any]:
         """
-        使用所有已注册的转换器处理数据
-
+        获取转换器
+        
         Args:
-            data: 原始数据
-
+            name: 转换器名称
+            
         Returns:
-            转换后的数据
+            转换器实例，不存在则返回None
         """
-        result = data
-        for name, transformer in self._transformers.items():
-            try:
-                if asyncio.iscoroutinefunction(transformer.transform):
-                    result = await transformer.transform(result)
-                else:
-                    result = transformer.transform(result)
-            except Exception as e:
-                logger.error(f"转换器 {name} 处理数据失败: {e}")
-
-        return result
-
-    def get_service_names(self, service_type: Optional[ServiceType] = None) -> Dict[ServiceType, List[str]]:
+        return self._transformers.get(name)
+    
+    def register_protocol_converter(self, name: str, converter: Any) -> None:
         """
-        获取所有注册的服务名称
-
+        注册协议转换器
+        
         Args:
-            service_type: 如果提供，仅返回指定类型的服务
-
-        Returns:
-            按服务类型分组的服务名称字典
+            name: 转换器名称
+            converter: 转换器实例
         """
-        if service_type:
-            return {service_type: list(self._services[service_type].keys())}
-
+        self._converters[name] = converter
+        self._registry.register(f"converter:{name}", converter, ServiceType.PROTOCOL_CONVERTER)
+    
+    def get_protocol_converter(self, name: str) -> Optional[Any]:
+        """
+        获取协议转换器
+        
+        Args:
+            name: 转换器名称
+            
+        Returns:
+            转换器实例，不存在则返回None
+        """
+        return self._converters.get(name)
+    
+    def register_dependency(self, component_name: str, depends_on: str) -> None:
+        """
+        注册组件依赖关系
+        
+        Args:
+            component_name: 组件名称
+            depends_on: 依赖的组件名称
+        """
+        self._dependencies[component_name].add(depends_on)
+    
+    def get_dependencies(self, component_name: str) -> Set[str]:
+        """
+        获取组件的所有依赖
+        
+        Args:
+            component_name: 组件名称
+            
+        Returns:
+            依赖组件名称集合
+        """
+        return self._dependencies.get(component_name, set())
+    
+    def get_dependent_components(self, component_name: str) -> Set[str]:
+        """
+        获取依赖于指定组件的所有组件
+        
+        Args:
+            component_name: 组件名称
+            
+        Returns:
+            依赖的组件名称集合
+        """
+        dependents = set()
+        for name, deps in self._dependencies.items():
+            if component_name in deps:
+                dependents.add(name)
+        return dependents
+    
+    @property
+    def message_bus(self):
+        """获取消息总线实例"""
+        if not self._message_bus:
+            self._message_bus = self._registry.get_by_type(ServiceType.MESSAGE_BUS).get('message_bus')
+        return self._message_bus
+    
+    @property
+    def event_bus(self):
+        """获取事件总线实例"""
+        if not self._event_bus:
+            self._event_bus = self._registry.get_by_type(ServiceType.EVENT_BUS).get('event_bus')
+        return self._event_bus
+    
+    @property
+    def command_dispatcher(self):
+        """获取命令分发器实例"""
+        if not self._command_dispatcher:
+            self._command_dispatcher = self._registry.get_by_type(ServiceType.COMMAND_DISPATCHER).get('command_dispatcher')
+        return self._command_dispatcher
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """
+        获取共享服务统计信息
+        
+        Returns:
+            统计信息
+        """
         return {
-            st: list(self._services[st].keys())
-            for st in ServiceType
+            'registry': self._registry.get_stats(),
+            'transformers': len(self._transformers),
+            'converters': len(self._converters),
+            'dependencies': {
+                name: list(deps)
+                for name, deps in self._dependencies.items()
+            }
         }
 
-    def get_service_status(self) -> Dict[str, Dict[str, Any]]:
-        """
-        获取所有服务的状态
 
-        Returns:
-            服务状态信息字典
-        """
-        status = {}
-        for service_type in ServiceType:
-            for name, service in self._services[service_type].items():
-                is_default = self._default_services.get(service_type) == name
-
-                service_info = {
-                    "type": service_type.name,
-                    "initialized": self._initialized.get(name, False),
-                    "is_default": is_default,
-                    "dependencies": list(self._dependencies.get(name, set()))
-                }
-
-                # 如果服务有健康检查方法，调用它
-                if hasattr(service, "health_check") and callable(service.health_check):
-                    try:
-                        service_info["health"] = service.health_check()
-                    except Exception as e:
-                        service_info["health"] = {
-                            "status": "error", "message": str(e)}
-
-                status[name] = service_info
-
-        return status
-
-
-def requires_service(service_type: ServiceType, name: Optional[str] = None):
+def require_service(service_name: str, service_type: Optional[ServiceType] = None):
     """
-    服务依赖装饰器，确保方法执行前已获取所需服务
-
+    服务依赖装饰器，用于注入服务依赖
+    
     Args:
-        service_type: 所需的服务类型
-        name: 服务名称，如果为None则使用默认服务
-
-    用法示例:
-    ```
-    @requires_service(ServiceType.EVENT_BUS)
-    async def publish_event(self, event_name, data):
-        event_bus = self.shared_services.get_service(ServiceType.EVENT_BUS)
-        await event_bus.publish(event_name, data)
-    ```
+        service_name: 服务名称
+        service_type: 服务类型，用于辅助查找
+    
+    Returns:
+        装饰器函数
     """
     def decorator(func):
         @wraps(func)
         async def wrapper(self, *args, **kwargs):
-            if not hasattr(self, "shared_services") or not isinstance(self.shared_services, SharedServices):
-                raise AttributeError(
-                    f"{self.__class__.__name__} 必须有 shared_services 属性")
-
-            # 尝试获取服务
-            try:
-                service = await self.shared_services.get_service(service_type, name)
-                # 调用原始方法
-                return await func(self, *args, **kwargs)
-            except ServiceNotFoundException as e:
-                logger.error(f"执行 {func.__name__} 失败: {e}")
-                raise
-
+            # 获取共享服务容器
+            shared_services = getattr(self, 'shared_services', None)
+            if not shared_services:
+                raise AttributeError(f"组件 {self.__class__.__name__} 没有 shared_services 属性")
+            
+            # 查找服务
+            service = shared_services.get_service(service_name)
+            if not service and service_type:
+                # 尝试按类型查找
+                services = shared_services.get_services_by_type(service_type)
+                if services:
+                    service = list(services.values())[0]
+            
+            if not service:
+                raise ValueError(f"未找到服务: {service_name}")
+            
+            # 注册服务依赖
+            component_name = getattr(self, 'name', self.__class__.__name__)
+            shared_services.register_dependency(component_name, service_name)
+            
+            # 将服务添加到关键字参数
+            kwargs[service_name] = service
+            
+            return await func(self, *args, **kwargs)
         return wrapper
     return decorator
+
+
+class ServiceManagerMixin:
+    """服务管理混入类，为组件提供服务管理功能"""
+    
+    def __init__(self, shared_services: Optional[SharedServices] = None):
+        """
+        初始化服务管理混入类
+        
+        Args:
+            shared_services: 共享服务容器
+        """
+        self._shared_services = shared_services or SharedServices()
+    
+    def register_service(self, name: str, service: Any, service_type: ServiceType) -> None:
+        """
+        注册服务
+        
+        Args:
+            name: 服务名称
+            service: 服务实例
+            service_type: 服务类型
+        """
+        self._shared_services.register_service(name, service, service_type)
+    
+    def get_service(self, name: str) -> Optional[Any]:
+        """
+        获取服务实例
+        
+        Args:
+            name: 服务名称
+            
+        Returns:
+            服务实例，不存在则返回None
+        """
+        return self._shared_services.get_service(name)
+    
+    @property
+    def message_bus(self):
+        """获取消息总线实例"""
+        return self._shared_services.message_bus
+    
+    @property
+    def event_bus(self):
+        """获取事件总线实例"""
+        return self._shared_services.event_bus
+    
+    @property
+    def command_dispatcher(self):
+        """获取命令分发器实例"""
+        return self._shared_services.command_dispatcher

@@ -1,14 +1,13 @@
 from abc import ABC, abstractmethod
 from datetime import datetime
-import zlib
-import json
 from typing import Any, Dict, List, Callable, Optional, Union
 from app.core.message_bus import Message
-from collections import defaultdict
-import time
 import logging
-import asyncio
+from collections import defaultdict
 from functools import wraps
+import zlib
+import json
+import asyncio
 import traceback
 
 logger = logging.getLogger(__name__)
@@ -17,8 +16,16 @@ class MessageTransform(ABC):
     """消息转换器基类，定义了转换接口"""
     
     @abstractmethod
-    async def transform(self, message: Message) -> Message:
-        """转换消息的抽象方法"""
+    async def transform(self, data: Any) -> Any:
+        """
+        转换数据
+        
+        Args:
+            data: 要转换的数据
+            
+        Returns:
+            转换后的数据
+        """
         pass
     
     @property
@@ -27,29 +34,22 @@ class MessageTransform(ABC):
         return self.__class__.__name__
     
     def __str__(self) -> str:
-        return self.name
+        return f"{self.name} Transformer"
 
 
 def transform_error_handler(func):
     """转换器错误处理装饰器"""
     @wraps(func)
-    async def wrapper(self, message: Message) -> Message:
+    async def wrapper(self, data: Any) -> Any:
         try:
-            return await func(self, message)
+            if asyncio.iscoroutinefunction(func):
+                return await func(self, data)
+            return func(self, data)
         except Exception as e:
-            logger.error(f"转换器 {self.name} 执行失败: {e}")
+            logger.error(f"转换失败 ({self.name}): {e}")
             logger.debug(traceback.format_exc())
-            # 记录错误信息到消息元数据
-            if message.metadata is None:
-                message.metadata = {}
-            if 'transform_errors' not in message.metadata:
-                message.metadata['transform_errors'] = []
-            message.metadata['transform_errors'].append({
-                'transformer': self.name,
-                'error': str(e),
-                'timestamp': datetime.now().isoformat()
-            })
-            return message
+            # 返回原始数据，确保不会阻断消息流
+            return data
     return wrapper
 
 
@@ -61,245 +61,338 @@ class CompressionTransform(MessageTransform):
         初始化压缩转换器
         
         Args:
-            threshold: 触发压缩的最小数据大小(字节)
-            compression_level: 压缩级别(1-9)，9为最高压缩率
+            threshold: 压缩阈值，大于此值的数据才会被压缩
+            compression_level: 压缩级别 (0-9)，级别越高压缩率越高但速度越慢
         """
         self.threshold = threshold
         self.compression_level = compression_level
-    
+        
     @transform_error_handler
-    async def transform(self, message: Message) -> Message:
-        """压缩消息数据"""
-        if isinstance(message.data, (str, bytes)):
-            data = message.data if isinstance(message.data, bytes) else message.data.encode()
-            # 仅压缩超过阈值的数据
-            if len(data) > self.threshold:
-                message.data = zlib.compress(data, self.compression_level)
-                if message.metadata is None:
-                    message.metadata = {}
-                message.metadata['compressed'] = True
-                message.metadata['original_size'] = len(data)
-                message.metadata['compressed_size'] = len(message.data)
-        return message
+    async def transform(self, data: Any) -> Any:
+        """压缩数据"""
+        if isinstance(data, str) and len(data) > self.threshold:
+            # 字符串数据压缩
+            compressed = zlib.compress(data.encode('utf-8'), self.compression_level)
+            return {
+                "_compressed": True,
+                "data": compressed,
+                "original_size": len(data),
+                "compression_ratio": len(data) / len(compressed)
+            }
+        elif isinstance(data, dict) and not data.get("_compressed"):
+            # 字典形式的JSON数据，转换为字符串再压缩
+            json_str = json.dumps(data)
+            if len(json_str) > self.threshold:
+                compressed = zlib.compress(json_str.encode('utf-8'), self.compression_level)
+                return {
+                    "_compressed": True,
+                    "data": compressed,
+                    "original_size": len(json_str),
+                    "compression_ratio": len(json_str) / len(compressed)
+                }
+        return data
 
 
 class DecompressionTransform(MessageTransform):
     """解压转换器，用于解压缩消息数据"""
     
     @transform_error_handler
-    async def transform(self, message: Message) -> Message:
-        """解压消息数据"""
-        if isinstance(message.data, bytes) and message.metadata and message.metadata.get('compressed'):
-            message.data = zlib.decompress(message.data)
-            message.metadata['compressed'] = False
-        return message
+    async def transform(self, data: Any) -> Any:
+        """解压数据"""
+        if isinstance(data, dict) and data.get("_compressed"):
+            try:
+                # 解压缩数据
+                decompressed = zlib.decompress(data["data"]).decode('utf-8')
+                # 尝试解析JSON
+                try:
+                    return json.loads(decompressed)
+                except json.JSONDecodeError:
+                    # 不是JSON，返回原始解压后的字符串
+                    return decompressed
+            except Exception as e:
+                logger.error(f"解压失败: {e}")
+                # 解压失败，返回原始数据
+                return data
+        return data
 
 
 class EncryptionTransform(MessageTransform):
-    """加密转换器"""
+    """加密转换器，用于加密消息数据"""
     
-    def __init__(self, key: bytes):
-        self.key = key
+    def __init__(self, encryption_key: str, encrypt_fields: List[str] = None):
+        """
+        初始化加密转换器
+        
+        Args:
+            encryption_key: 加密密钥
+            encrypt_fields: 需要加密的字段列表，None表示加密整个数据
+        """
+        self.encryption_key = encryption_key
+        self.encrypt_fields = encrypt_fields
     
     @transform_error_handler
-    async def transform(self, message: Message) -> Message:
-        # 这里可以实现实际的加密逻辑
-        if message.metadata is None:
-            message.metadata = {}
-        message.metadata['encrypted'] = True
-        return message
-
-
+    async def transform(self, data: Any) -> Any:
+        """加密数据 - 实际实现中使用合适的加密算法"""
+        # 这里只做简单示例，实际项目中应使用如Fernet等安全加密算法
+        if self.encrypt_fields and isinstance(data, dict):
+            # 只加密指定字段
+            result = data.copy()
+            for field in self.encrypt_fields:
+                if field in result:
+                    # 在这里替换为实际加密逻辑
+                    result[field] = f"ENCRYPTED:{result[field]}"
+            return result
+        else:
+            # 加密整个数据
+            # 在这里替换为实际加密逻辑
+            return f"ENCRYPTED:{data}"
+        
+        
 class MessageValidator(MessageTransform):
-    """消息验证转换器"""
+    """消息验证器，用于验证消息格式"""
+    
+    def __init__(self, schema: Dict = None, validator_func: Callable = None):
+        """
+        初始化消息验证器
+        
+        Args:
+            schema: JSON Schema用于验证
+            validator_func: 自定义验证函数
+        """
+        self.schema = schema
+        self.validator_func = validator_func
     
     @transform_error_handler
-    async def transform(self, message: Message) -> Message:
-        if not message.topic:
-            raise ValueError("消息缺少必要的主题")
-        if message.data is None:
-            raise ValueError("消息缺少必要的数据")
-        return message
+    async def transform(self, data: Any) -> Any:
+        """验证数据"""
+        if self.validator_func:
+            # 使用自定义验证函数
+            if not self.validator_func(data):
+                logger.warning(f"消息验证失败: {data}")
+                # 可以选择返回None或抛出异常
+                return None
+        
+        if self.schema and isinstance(data, dict):
+            # 使用jsonschema验证数据
+            try:
+                import jsonschema
+                jsonschema.validate(instance=data, schema=self.schema)
+            except jsonschema.exceptions.ValidationError as e:
+                logger.warning(f"Schema验证失败: {e}")
+                return None
+                
+        return data
 
 
 class MessageEnricher(MessageTransform):
-    """消息富集转换器，用于添加元数据"""
+    """消息增强器，用于添加额外信息"""
     
-    def __init__(self, enrichments: Dict[str, Any] = None):
+    def __init__(self, enrich_func: Callable = None, static_fields: Dict = None):
         """
-        初始化消息富集器
+        初始化消息增强器
         
         Args:
-            enrichments: 要添加的固定元数据
+            enrich_func: 自定义增强函数
+            static_fields: 静态字段，将添加到所有消息
         """
-        self.enrichments = enrichments or {}
+        self.enrich_func = enrich_func
+        self.static_fields = static_fields or {}
     
     @transform_error_handler
-    async def transform(self, message: Message) -> Message:
-        if message.metadata is None:
-            message.metadata = {}
+    async def transform(self, data: Any) -> Any:
+        """增强数据"""
+        if isinstance(data, dict):
+            # 复制数据，避免修改原始对象
+            result = data.copy()
+            
+            # 添加静态字段
+            for key, value in self.static_fields.items():
+                if key not in result:
+                    result[key] = value
+            
+            # 应用自定义增强函数
+            if self.enrich_func:
+                enriched = self.enrich_func(result)
+                if enriched is not None:
+                    result = enriched
+            
+            # 添加时间戳（如果没有）
+            if "timestamp" not in result:
+                result["timestamp"] = datetime.now().isoformat()
+                
+            return result
         
-        # 添加基础元数据
-        message.metadata.update({
-            'timestamp': datetime.now().isoformat(),
-            'version': '1.0'
-        })
-        
-        # 添加自定义元数据
-        message.metadata.update(self.enrichments)
-        return message
+        return data
 
 
 class JsonTransform(MessageTransform):
-    """JSON转换器，用于序列化/反序列化JSON数据"""
+    """JSON转换器，用于序列化/反序列化JSON"""
     
-    def __init__(self, mode: str = 'serialize'):
+    def __init__(self, serialize: bool = True):
         """
         初始化JSON转换器
         
         Args:
-            mode: 'serialize' 或 'deserialize'
+            serialize: True表示序列化，False表示反序列化
         """
-        if mode not in ['serialize', 'deserialize']:
-            raise ValueError("模式必须是 'serialize' 或 'deserialize'")
-        self.mode = mode
+        self.serialize = serialize
     
     @transform_error_handler
-    async def transform(self, message: Message) -> Message:
-        if self.mode == 'serialize' and isinstance(message.data, (dict, list)):
-            message.data = json.dumps(message.data)
-            if message.metadata is None:
-                message.metadata = {}
-            message.metadata['content_type'] = 'application/json'
-        elif self.mode == 'deserialize' and isinstance(message.data, str):
-            try:
-                message.data = json.loads(message.data)
-                if message.metadata is None:
-                    message.metadata = {}
-                message.metadata['content_type'] = 'application/python'
-            except json.JSONDecodeError:
-                # 不是有效的JSON，保持原样
-                pass
-        return message
+    async def transform(self, data: Any) -> Any:
+        """转换数据"""
+        if self.serialize:
+            # 序列化为JSON字符串
+            if isinstance(data, (dict, list)):
+                return json.dumps(data)
+            return data
+        else:
+            # 反序列化JSON字符串
+            if isinstance(data, str):
+                try:
+                    return json.loads(data)
+                except json.JSONDecodeError:
+                    logger.warning(f"JSON解析失败: {data}")
+            return data
 
 
 class MessageTransformer:
-    """消息转换器，用于管理和应用多个转换器"""
+    """消息转换管理器，协调多个转换器的应用"""
     
     def __init__(self):
-        """初始化消息转换器"""
+        self.transformers: List[MessageTransform] = []
+        self.topic_transformers: Dict[str, List[MessageTransform]] = defaultdict(list)
         self._message_bus = None
-        self._transformers: List[MessageTransform] = []
-        self._metrics = defaultdict(int)
-        self._processing_times = defaultdict(list)
-        self._max_metrics_history = 100
+        self._metrics = {
+            'transform_count': 0,
+            'error_count': 0,
+            'average_time': 0,
+            'transform_times': []
+        }
+        self._max_history = 100
     
     async def set_message_bus(self, message_bus):
-        """设置消息总线"""
+        """设置消息总线引用"""
         self._message_bus = message_bus
+        logger.info("消息总线已与转换器管理器集成")
     
-    def add_transformer(self, transformer: MessageTransform) -> 'MessageTransformer':
-        """添加转换器到转换链"""
-        self._transformers.append(transformer)
-        return self
-    
-    def clear_transformers(self) -> 'MessageTransformer':
-        """清除所有转换器"""
-        self._transformers.clear()
-        return self
-    
-    async def transform(self, message: Any) -> Any:
-        """应用所有转换器处理消息"""
-        start_time = time.time()
+    def add_transformer(self, transformer: MessageTransform, topic_pattern: str = None) -> None:
+        """
+        添加转换器
         
-        # 应用所有转换器
-        result = message
-        for transformer in self._transformers:
-            transform_start = time.time()
-            try:
-                result = await transformer.transform(result)
-                self._metrics[transformer.name] += 1
-                
-                # 记录转换器处理时间
-                elapsed = time.time() - transform_start
-                self._processing_times[transformer.name].append(elapsed)
-                if len(self._processing_times[transformer.name]) > self._max_metrics_history:
-                    self._processing_times[transformer.name].pop(0)
-                
-            except Exception as e:
-                logger.error(f"转换器 {transformer.name} 执行失败: {e}")
-                logger.debug(traceback.format_exc())
-                self._metrics[f"{transformer.name}_errors"] += 1
-        
-        # 记录总体性能指标
-        processing_time = time.time() - start_time
-        self._metrics['total_transforms'] += 1
-        self._metrics['avg_transform_time'] = (
-            (self._metrics.get('avg_transform_time', 0) * (self._metrics['total_transforms'] - 1) + 
-             processing_time) / self._metrics['total_transforms']
-        )
-        
-        return result
+        Args:
+            transformer: 转换器实例
+            topic_pattern: 主题模式，None表示应用于所有消息
+        """
+        if topic_pattern:
+            self.topic_transformers[topic_pattern].append(transformer)
+        else:
+            self.transformers.append(transformer)
+        logger.info(f"添加转换器: {transformer.name}, 主题: {topic_pattern or '全局'}")
     
-    @property
-    def metrics(self) -> Dict[str, Any]:
+    async def transform(self, message: Message) -> Message:
+        """
+        应用所有匹配的转换器处理消息
+        
+        Args:
+            message: 要处理的消息
+            
+        Returns:
+            处理后的消息
+        """
+        start_time = asyncio.get_event_loop().time()
+        
+        try:
+            # 应用全局转换器
+            for transformer in self.transformers:
+                try:
+                    message.data = await transformer.transform(message.data)
+                    if message.data is None:
+                        # 转换失败，终止处理
+                        logger.warning(f"转换器 {transformer.name} 返回None，终止处理")
+                        return None
+                except Exception as e:
+                    logger.error(f"转换器 {transformer.name} 处理失败: {e}")
+                    self._metrics['error_count'] += 1
+            
+            # 应用特定主题的转换器
+            for pattern, transformers in self.topic_transformers.items():
+                if self._match_topic(message.topic, pattern):
+                    for transformer in transformers:
+                        try:
+                            message.data = await transformer.transform(message.data)
+                            if message.data is None:
+                                logger.warning(f"主题转换器 {transformer.name} 返回None，终止处理")
+                                return None
+                        except Exception as e:
+                            logger.error(f"主题转换器 {transformer.name} 处理失败: {e}")
+                            self._metrics['error_count'] += 1
+            
+            # 更新指标
+            self._metrics['transform_count'] += 1
+            transform_time = asyncio.get_event_loop().time() - start_time
+            self._metrics['transform_times'].append(transform_time)
+            
+            if len(self._metrics['transform_times']) > self._max_history:
+                self._metrics['transform_times'].pop(0)
+            
+            self._metrics['average_time'] = sum(self._metrics['transform_times']) / len(self._metrics['transform_times'])
+            
+            return message
+            
+        except Exception as e:
+            logger.error(f"转换消息时出错: {e}")
+            self._metrics['error_count'] += 1
+            # 返回原始消息，确保不会阻断消息流
+            return message
+    
+    def _match_topic(self, topic: str, pattern: str) -> bool:
+        """
+        检查主题是否匹配模式
+        
+        Args:
+            topic: 消息主题
+            pattern: 主题模式，支持通配符 *
+            
+        Returns:
+            是否匹配
+        """
+        # 转换通配符模式为正则表达式
+        if '*' in pattern:
+            import re
+            regex_pattern = pattern.replace('.', '\\.').replace('*', '.*')
+            return bool(re.match(f"^{regex_pattern}$", topic))
+        return topic == pattern
+    
+    def get_metrics(self) -> Dict[str, Any]:
         """获取转换器指标"""
-        metrics = dict(self._metrics)
-        
-        # 添加每个转换器的平均处理时间
-        for name, times in self._processing_times.items():
-            if times:
-                metrics[f"{name}_avg_time"] = sum(times) / len(times)
-        
-        return metrics
+        return self._metrics.copy()
     
-    @property
-    def transformers(self) -> List[MessageTransform]:
-        """获取所有转换器"""
-        return self._transformers
-    
-    def create_filter_chain(self, topic_pattern: str = None, 
-                           condition: Callable[[Message], bool] = None) -> 'TransformFilterChain':
-        """创建一个过滤转换链"""
-        return TransformFilterChain(self, topic_pattern, condition)
+    def get_transformers(self) -> List[str]:
+        """获取所有转换器名称"""
+        transformers = [t.name for t in self.transformers]
+        for pattern, topic_transformers in self.topic_transformers.items():
+            for t in topic_transformers:
+                transformers.append(f"{t.name} ({pattern})")
+        return transformers
 
 
 class TransformFilterChain:
-    """转换过滤链，用于条件性地应用转换器"""
+    """转换过滤链，用于链式处理消息"""
     
-    def __init__(self, transformer: MessageTransformer, 
-                topic_pattern: str = None,
-                condition: Callable[[Message], bool] = None):
-        self.transformer = transformer
-        self.topic_pattern = topic_pattern
-        self.condition = condition
-        self._chain_transformers: List[MessageTransform] = []
-    
-    def add_transformer(self, transformer: MessageTransform) -> 'TransformFilterChain':
-        """添加转换器到当前过滤链"""
-        self._chain_transformers.append(transformer)
+    def __init__(self):
+        self.transforms: List[MessageTransform] = []
+        
+    def add_transform(self, transform: MessageTransform) -> 'TransformFilterChain':
+        """添加转换器到链"""
+        self.transforms.append(transform)
         return self
     
-    def should_apply(self, message: Message) -> bool:
-        """检查是否应该应用转换链到此消息"""
-        if self.topic_pattern and not message.topic.startswith(self.topic_pattern):
-            return False
-        
-        if self.condition is not None:
-            return self.condition(message)
-            
-        return True
-    
-    async def transform(self, message: Message) -> Message:
-        """应用转换链到消息"""
-        if not self.should_apply(message):
-            return message
-            
-        result = message
-        for transformer in self._chain_transformers:
-            try:
-                result = await transformer.transform(result)
-            except Exception as e:
-                logger.error(f"过滤链转换器 {transformer.__class__.__name__} 执行失败: {e}")
-        
+    async def process(self, data: Any) -> Any:
+        """处理数据，按顺序应用所有转换器"""
+        result = data
+        for transform in self.transforms:
+            result = await transform.transform(result)
+            if result is None:
+                # 有转换器返回None，中断链
+                break
         return result

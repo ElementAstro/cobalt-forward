@@ -1,16 +1,15 @@
 from functools import wraps
 import time
 import asyncio
-from typing import Callable, TypeVar, Any, Dict, List, Optional
+from typing import Callable, TypeVar, cast, Any, Optional, Awaitable
 from loguru import logger
-import cProfile
-import pstats
-import io
 import psutil
 from dataclasses import dataclass
 from collections import deque
 
 T = TypeVar('T')
+R = TypeVar('R')
+
 
 @dataclass
 class PerformanceMetrics:
@@ -21,81 +20,88 @@ class PerformanceMetrics:
     average_latency: float
     operation_count: int = 0
     error_count: int = 0
-    
-def sync_performance_monitor():
+
+
+def sync_performance_monitor() -> Callable[[Callable[..., R]], Callable[..., R]]:
     """同步函数性能监控装饰器"""
-    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+    def decorator(func: Callable[..., R]) -> Callable[..., R]:
         @wraps(func)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: Any, **kwargs: Any) -> R:
             start_time = time.perf_counter()
             try:
-                result = func(*args, **kwargs)
+                result: R = func(*args, **kwargs)
                 execution_time = time.perf_counter() - start_time
-                logger.debug(f"{func.__name__} executed in {execution_time:.4f} seconds")
+                logger.debug(
+                    f"{func.__name__} executed in {execution_time:.4f} seconds")
                 return result
             except Exception as e:
                 execution_time = time.perf_counter() - start_time
-                logger.error(f"{func.__name__} failed after {execution_time:.4f} seconds: {str(e)}")
+                logger.error(
+                    f"{func.__name__} failed after {execution_time:.4f} seconds: {str(e)}")
                 raise
         return wrapper
     return decorator
 
-def async_performance_monitor():
+
+def async_performance_monitor() -> Callable[[Callable[..., Awaitable[R]]], Callable[..., Awaitable[R]]]:
     """异步函数性能监控装饰器"""
-    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+    def decorator(func: Callable[..., Awaitable[R]]) -> Callable[..., Awaitable[R]]:
         @wraps(func)
-        async def wrapper(*args, **kwargs):
+        async def wrapper(*args: Any, **kwargs: Any) -> R:
             start_time = time.perf_counter()
             try:
-                result = await func(*args, **kwargs)
+                result: R = await func(*args, **kwargs)
                 execution_time = time.perf_counter() - start_time
-                logger.debug(f"{func.__name__} executed in {execution_time:.4f} seconds")
+                logger.debug(
+                    f"{func.__name__} executed in {execution_time:.4f} seconds")
                 return result
             except Exception as e:
                 execution_time = time.perf_counter() - start_time
-                logger.error(f"{func.__name__} failed after {execution_time:.4f} seconds: {str(e)}")
+                logger.error(
+                    f"{func.__name__} failed after {execution_time:.4f} seconds: {str(e)}")
                 raise
-        return wrapper
+        return cast(Callable[..., Awaitable[R]], wrapper)
     return decorator
+
 
 class PerformanceMonitor:
     def __init__(self, history_size: int = 100):
         self.start_time = time.time()
-        self.message_timestamps = deque(maxlen=history_size)
-        self.latencies = deque(maxlen=history_size)
+        self.message_timestamps: deque[float] = deque(maxlen=history_size)
+        self.latencies: deque[float] = deque(maxlen=history_size)
         self._running = False
-        self._monitor_task: Optional[asyncio.Task] = None
+        self._monitor_task: Optional[asyncio.Task[None]] = None
         self.operation_count = 0
         self.error_count = 0
 
-    async def start(self):
+    async def start(self) -> None:
         """启动性能监控"""
         self._running = True
         self._monitor_task = asyncio.create_task(self._monitor_loop())
         logger.info("Performance monitoring started")
 
-    async def stop(self):
+    async def stop(self) -> None:
         """停止性能监控"""
         self._running = False
         if self._monitor_task:
             await self._monitor_task
         logger.info("Performance monitoring stopped")
 
-    def record_forward(self):
+    def record_forward(self) -> None:
         """记录消息转发"""
         self.operation_count += 1
         self.record_message(0)  # 默认延迟为0
 
-    def record_message(self, latency: float):
+    def record_message(self, latency: float) -> None:
         """记录消息处理时间"""
         self.message_timestamps.append(time.time())
         self.latencies.append(latency)
 
-    def record_error(self):
+    def record_error(self) -> None:
         """记录错误"""
         self.error_count += 1
 
-    async def _monitor_loop(self):
+    async def _monitor_loop(self) -> None:
         while self._running:
             try:
                 metrics = self.get_current_metrics()
@@ -107,9 +113,11 @@ class PerformanceMonitor:
     def get_current_metrics(self) -> PerformanceMetrics:
         """获取当前性能指标"""
         now = time.time()
-        recent_messages = sum(1 for t in self.message_timestamps if now - t <= 60)
+        recent_messages = sum(
+            1 for t in self.message_timestamps if now - t <= 60)
         message_rate = recent_messages / 60 if recent_messages else 0
-        avg_latency = sum(self.latencies) / len(self.latencies) if self.latencies else 0
+        avg_latency = sum(self.latencies) / \
+            len(self.latencies) if self.latencies else 0
 
         return PerformanceMetrics(
             cpu_percent=psutil.cpu_percent(),
@@ -121,7 +129,7 @@ class PerformanceMonitor:
             error_count=self.error_count
         )
 
-    def _log_metrics(self, metrics: PerformanceMetrics):
+    def _log_metrics(self, metrics: PerformanceMetrics) -> None:
         """记录性能指标"""
         logger.info(
             "Performance Metrics:\n"
@@ -134,8 +142,10 @@ class PerformanceMonitor:
             f"Errors: {metrics.error_count}"
         )
 
+
 class RateLimiter:
     """速率限制器"""
+
     def __init__(self, rate_limit: int, time_window: float = 1.0):
         self.rate_limit = rate_limit
         self.time_window = time_window
@@ -149,7 +159,8 @@ class RateLimiter:
             time_passed = now - self.last_update
             self.tokens = min(
                 self.rate_limit,
-                self.tokens + time_passed * (self.rate_limit / self.time_window)
+                self.tokens + time_passed *
+                (self.rate_limit / self.time_window)
             )
             self.last_update = now
 
