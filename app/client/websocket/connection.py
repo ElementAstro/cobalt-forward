@@ -1,8 +1,10 @@
 import asyncio
-import weakref
 from contextlib import asynccontextmanager, suppress
+# Added Coroutine and Tuple
+from typing import Any, Dict, Set, Optional, Coroutine
 import websockets
 from websockets.exceptions import ConnectionClosed, WebSocketException
+from websockets.client import WebSocketClientProtocol  # For typing self.connection
 from loguru import logger
 from .config import WebSocketConfig
 from .events import EventManager
@@ -10,7 +12,7 @@ from .events import EventManager
 
 class ConnectionManager:
     """WebSocket Connection Manager
-    
+
     Manages WebSocket connection lifecycle, including connection establishment,
     monitoring, heartbeat, automatic reconnection and graceful shutdown.
     """
@@ -18,11 +20,11 @@ class ConnectionManager:
     def __init__(self, config: WebSocketConfig, event_manager: EventManager):
         self.config = config
         self.event_manager = event_manager
-        self.connection = None
+        self.connection: Optional[WebSocketClientProtocol] = None
         self.connected = False
-        self._ping_task = None
+        self._ping_task: Optional[asyncio.Task[Optional[Any]]] = None
         self._reconnect_attempts = 0
-        self._tasks = set()
+        self._tasks: Set[asyncio.Task[Optional[Any]]] = set()
         self._lock = asyncio.Lock()
         self._closing = False
         self._closed_event = asyncio.Event()
@@ -31,10 +33,10 @@ class ConnectionManager:
     @asynccontextmanager
     async def connection_context(self):
         """Connection context manager
-        
+
         Creates a context where a connection is guaranteed to be established
         and properly closed when exiting the context.
-        
+
         Yields:
             ConnectionManager: Self reference
         """
@@ -46,10 +48,10 @@ class ConnectionManager:
 
     async def connect(self) -> bool:
         """Establish WebSocket connection
-        
+
         Connects to WebSocket server using the provided configuration.
         Implements connection locking to prevent concurrent connection attempts.
-        
+
         Returns:
             bool: True if connected successfully, False otherwise
         """
@@ -77,8 +79,11 @@ class ConnectionManager:
             await self.event_manager.trigger('before_connect')
 
             try:
-                connect_kwargs = {
-                    'uri': self.config.uri,
+                # uri must be the first positional argument to websockets.connect
+                uri = self.config.uri
+
+                connect_kwargs: Dict[str, Any] = {
+                    # 'uri': self.config.uri, # URI is now a positional argument
                     'ssl': self.config.ssl_context,
                     'extra_headers': self.config.headers,
                     'subprotocols': self.config.subprotocols,
@@ -86,17 +91,18 @@ class ConnectionManager:
                     'compression': self.config.compression,
                     'close_timeout': self.config.close_timeout,
                     # Add connection timeout
-                    'open_timeout': 30.0
+                    'open_timeout': 30.0  # Ensure this is a float or None
                 }
 
                 # Filter out None parameters
+                # Explicitly type k and v for clarity if needed, though inferred types should work
                 connect_kwargs = {k: v for k,
                                   v in connect_kwargs.items() if v is not None}
 
                 if self.config.extra_options:
                     connect_kwargs.update(self.config.extra_options)
 
-                self.connection = await websockets.connect(**connect_kwargs)
+                self.connection = await websockets.connect(uri, **connect_kwargs)
                 self.connected = True
                 self._reconnect_attempts = 0
 
@@ -114,23 +120,23 @@ class ConnectionManager:
                 await self.event_manager.trigger('error', e)
                 return False
 
-    def _create_task(self, coro):
+    def _create_task(self, coro: Coroutine[Any, Any, Optional[Any]]) -> asyncio.Task[Optional[Any]]:
         """Create and track a task
-        
+
         Args:
             coro: Coroutine to execute as a task
-            
+
         Returns:
             asyncio.Task: Created task
         """
-        task = asyncio.create_task(coro)
+        task: asyncio.Task[Optional[Any]] = asyncio.create_task(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return task
 
     async def _keep_alive(self):
         """Keep connection alive with ping/pong mechanism
-        
+
         Periodically sends ping frames and monitors pong responses.
         Triggers reconnection if ping times out.
         """
@@ -156,7 +162,7 @@ class ConnectionManager:
 
     async def _monitor_connection(self):
         """Monitor connection state
-        
+
         Detects unexpected connection closures and handles disconnection events.
         """
         with suppress(asyncio.CancelledError):
@@ -182,9 +188,9 @@ class ConnectionManager:
                 if self.connected:
                     await self._handle_disconnection()
 
-    async def _handle_disconnection(self, reconnect=False):
+    async def _handle_disconnection(self, reconnect: bool = False):
         """Handle connection closure
-        
+
         Args:
             reconnect: Whether to attempt reconnection
         """
@@ -199,6 +205,7 @@ class ConnectionManager:
             await self.event_manager.trigger('disconnect')
 
             # Cancel all tasks
+            task: asyncio.Task[Optional[Any]]
             for task in list(self._tasks):
                 if not task.done() and task != asyncio.current_task():
                     task.cancel()
@@ -219,7 +226,7 @@ class ConnectionManager:
 
     async def _reconnect(self):
         """Reconnect after connection loss
-        
+
         Implements exponential backoff for reconnection attempts.
         """
         await asyncio.sleep(self.config.reconnect_interval)
@@ -230,7 +237,7 @@ class ConnectionManager:
 
     async def close(self):
         """Close the WebSocket connection gracefully
-        
+
         Ensures all pending tasks are cancelled and connection is properly closed.
         """
         if not self.connected and self._closed_event.is_set():
@@ -247,6 +254,7 @@ class ConnectionManager:
                 self.connected = False
 
                 # Cancel all tasks
+                task: asyncio.Task[Optional[Any]]
                 for task in list(self._tasks):
                     if not task.done():
                         task.cancel()
@@ -254,6 +262,8 @@ class ConnectionManager:
                 # Wait for task cancellation to complete
                 if self._tasks:
                     with suppress(asyncio.TimeoutError):
+                        # Ensure 't' is properly typed if list comprehension is complex,
+                        # but here it should infer from self._tasks
                         await asyncio.wait([t for t in self._tasks], timeout=2.0)
 
                 # Close WebSocket connection

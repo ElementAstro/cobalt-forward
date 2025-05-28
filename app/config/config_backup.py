@@ -3,11 +3,10 @@ import json
 from datetime import datetime
 import zipfile
 from loguru import logger
-import os
 import shutil
 import tempfile
 import hashlib
-from typing import List, Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 
 class ConfigBackup:
@@ -15,10 +14,11 @@ class ConfigBackup:
     Configuration backup management system.
     Handles creating, verifying, and restoring configuration backups with metadata.
     """
+
     def __init__(self, backup_dir: Path, max_backups: int = 10):
         """
         Initialize the backup manager.
-        
+
         Args:
             backup_dir: Directory to store backups
             max_backups: Maximum number of backups to retain
@@ -28,7 +28,7 @@ class ConfigBackup:
         self.max_backups = max_backups
         self.compression = zipfile.ZIP_DEFLATED
 
-    def _rotate_backups(self):
+    def _rotate_backups(self) -> None:
         """
         Rotate old backup files, removing the oldest when max_backups is reached.
         """
@@ -44,10 +44,10 @@ class ConfigBackup:
     def _calculate_checksum(self, file_path: Path) -> str:
         """
         Calculate SHA256 checksum of a file.
-        
+
         Args:
             file_path: Path to the file
-            
+
         Returns:
             Hexadecimal checksum string
         """
@@ -57,23 +57,25 @@ class ConfigBackup:
                 h.update(chunk)
         return h.hexdigest()
 
-    def create_backup(self, config_path: Path, metadata: dict = None) -> Path:
+    def create_backup(self, config_path: Path, metadata: Optional[Dict[str, Any]] = None) -> Path:
         """
         Create a configuration backup.
-        
+
         Args:
             config_path: Path to the configuration file to backup
             metadata: Additional metadata to store with backup
-            
+
         Returns:
             Path to the created backup file
-            
+
         Raises:
             FileNotFoundError: If the config file doesn't exist
         """
         if not config_path.exists():
-            logger.warning(f"Config file doesn't exist: {config_path}, cannot create backup")
-            raise FileNotFoundError(f"Config file doesn't exist: {config_path}")
+            logger.warning(
+                f"Config file doesn't exist: {config_path}, cannot create backup")
+            raise FileNotFoundError(
+                f"Config file doesn't exist: {config_path}")
 
         # Generate timestamp and backup filename
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -104,7 +106,7 @@ class ConfigBackup:
             # Move temporary backup file to target location
             if backup_path.exists():
                 backup_path.unlink()
-            shutil.move(temp_backup, backup_path)
+            shutil.move(str(temp_backup), str(backup_path))
 
             logger.info(f"Configuration backup created: {backup_path}")
             self._rotate_backups()
@@ -120,10 +122,10 @@ class ConfigBackup:
     def verify_backup(self, backup_path: Path) -> bool:
         """
         Verify the integrity of a backup file.
-        
+
         Args:
             backup_path: Path to the backup file
-            
+
         Returns:
             True if backup is valid, False otherwise
         """
@@ -132,16 +134,19 @@ class ConfigBackup:
                 # Check backup file structure
                 file_list = backup_zip.namelist()
                 if 'metadata.json' not in file_list:
-                    logger.error(f"Backup verification failed: {backup_path} is missing metadata")
+                    logger.error(
+                        f"Backup verification failed: {backup_path} is missing metadata")
                     return False
 
                 # Load metadata
-                metadata = json.loads(backup_zip.read('metadata.json'))
+                metadata_content = backup_zip.read('metadata.json')
+                metadata = json.loads(metadata_content)
 
                 # Ensure at least one config file exists
                 config_files = [f for f in file_list if f != 'metadata.json']
                 if not config_files:
-                    logger.error(f"Backup verification failed: {backup_path} doesn't contain config files")
+                    logger.error(
+                        f"Backup verification failed: {backup_path} doesn't contain config files")
                     return False
 
             logger.debug(f"Backup verification successful: {backup_path}")
@@ -151,14 +156,14 @@ class ConfigBackup:
             logger.error(f"Backup verification failed: {e}")
             return False
 
-    def restore_backup(self, backup_path: Path, target_path: Path) -> dict:
+    def restore_backup(self, backup_path: Path, target_path: Path) -> Dict[str, Any]:
         """
         Restore configuration from backup.
-        
+
         Args:
             backup_path: Path to the backup file
             target_path: Path where the config should be restored
-            
+
         Returns:
             Metadata dictionary from the backup
         """
@@ -167,17 +172,18 @@ class ConfigBackup:
                 name for name in backup_zip.namelist() if name != 'metadata.json')
             backup_zip.extract(config_file, target_path.parent)
 
-            metadata = {}
+            metadata: Dict[str, Any] = {}
             if 'metadata.json' in backup_zip.namelist():
-                metadata = json.loads(backup_zip.read('metadata.json'))
+                metadata_content = backup_zip.read('metadata.json')
+                metadata = json.loads(metadata_content)
 
         logger.info(f"Configuration restored from backup: {backup_path}")
         return metadata
 
-    def list_backups(self) -> list:
+    def list_backups(self) -> List[Path]:
         """
         List all available backups, sorted by modification time (newest first).
-        
+
         Returns:
             List of backup file paths
         """

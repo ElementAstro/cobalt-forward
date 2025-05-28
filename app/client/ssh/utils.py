@@ -6,10 +6,10 @@ from typing import List, Optional
 def get_file_hash(filepath: str) -> str:
     """
     Calculate MD5 hash of a file
-    
+
     Args:
         filepath: Path to the file
-        
+
     Returns:
         str: MD5 hash of the file as hexadecimal string
     """
@@ -23,16 +23,16 @@ def get_file_hash(filepath: str) -> str:
 def get_local_files(directory: str, exclude: Optional[List[str]] = None) -> List[str]:
     """
     Recursively get all file paths from a local directory
-    
+
     Args:
         directory: Local directory path
         exclude: List of file/directory patterns to exclude
-        
+
     Returns:
         List[str]: List of file paths
     """
     exclude = exclude or []
-    result = []
+    result: List[str] = []
 
     for root, dirs, files in os.walk(directory):
         # Exclude directories that shouldn't be traversed
@@ -51,12 +51,12 @@ def get_local_files(directory: str, exclude: Optional[List[str]] = None) -> List
 def is_path_excluded(path: str, base_path: str, exclude_patterns: List[str]) -> bool:
     """
     Check if a path should be excluded based on patterns
-    
+
     Args:
         path: Path to check
         base_path: Base path for relative path calculation
         exclude_patterns: List of exclusion patterns
-        
+
     Returns:
         bool: True if path should be excluded, False otherwise
     """

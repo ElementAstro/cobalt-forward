@@ -3,14 +3,13 @@ import os
 import pickle
 import uuid
 import time
-from pathlib import Path
 from loguru import logger
 
 
 class ResumableTransferManager:
     def __init__(self, storage_path: str = 'transfer_state.pkl'):
         """Initialize resumable transfer manager
-        
+
         Args:
             storage_path: Path to file for storing transfer state
         """
@@ -26,7 +25,7 @@ class ResumableTransferManager:
 
     def _load_state(self) -> Dict[str, Any]:
         """Load transfer state from storage
-        
+
         Returns:
             Dictionary containing transfer state information
         """
@@ -49,12 +48,12 @@ class ResumableTransferManager:
 
     def register_transfer(self, file_path: str, remote_path: str, file_size: int) -> str:
         """Register a new file transfer
-        
+
         Args:
             file_path: Local file path
             remote_path: Remote file path
             file_size: Size of the file in bytes
-            
+
         Returns:
             Transfer ID as string
         """
@@ -73,11 +72,11 @@ class ResumableTransferManager:
 
     def update_progress(self, transfer_id: str, bytes_transferred: int) -> None:
         """Update transfer progress
-        
+
         Args:
             transfer_id: Transfer ID
             bytes_transferred: Number of bytes transferred so far
-        
+
         Raises:
             KeyError: If transfer ID does not exist
         """
@@ -91,10 +90,10 @@ class ResumableTransferManager:
 
     def complete_transfer(self, transfer_id: str) -> None:
         """Mark transfer as completed
-        
+
         Args:
             transfer_id: Transfer ID
-            
+
         Raises:
             KeyError: If transfer ID does not exist
         """
@@ -108,11 +107,11 @@ class ResumableTransferManager:
 
     def fail_transfer(self, transfer_id: str, error: str) -> None:
         """Mark transfer as failed
-        
+
         Args:
             transfer_id: Transfer ID
             error: Error message
-            
+
         Raises:
             KeyError: If transfer ID does not exist
         """
@@ -126,10 +125,10 @@ class ResumableTransferManager:
 
     def get_transfer_info(self, transfer_id: str) -> Optional[Dict[str, Any]]:
         """Get information about a transfer
-        
+
         Args:
             transfer_id: Transfer ID
-            
+
         Returns:
             Dictionary with transfer information or None if not found
         """
@@ -137,13 +136,13 @@ class ResumableTransferManager:
 
     def get_resume_point(self, transfer_id: str) -> int:
         """Get byte position for resuming a transfer
-        
+
         Args:
             transfer_id: Transfer ID
-            
+
         Returns:
             Byte position for resuming transfer
-            
+
         Raises:
             KeyError: If transfer ID does not exist
         """
@@ -152,12 +151,12 @@ class ResumableTransferManager:
 
         return self.transfers[transfer_id].get('transferred', 0)
 
-    def list_transfers(self, status: str = None) -> Dict[str, Dict[str, Any]]:
+    def list_transfers(self, status: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
         """List all transfers, optionally filtered by status
-        
+
         Args:
             status: Optional status filter
-            
+
         Returns:
             Dictionary of transfer information
         """
@@ -168,15 +167,16 @@ class ResumableTransferManager:
 
     def clean_completed_transfers(self, older_than_days: int = 7) -> int:
         """Clean up completed transfer records
-        
+
         Args:
             older_than_days: Remove records older than this many days
-            
+
         Returns:
             Number of records removed
         """
         current_time = time.time()
-        cutoff_time = current_time - (older_than_days * 86400)  # 86400 seconds = 1 day
+        cutoff_time = current_time - \
+            (older_than_days * 86400)  # 86400 seconds = 1 day
 
         to_remove = [
             transfer_id for transfer_id, info in self.transfers.items()
@@ -193,13 +193,13 @@ class ResumableTransferManager:
 
     def get_transfer_progress(self, transfer_id: str) -> float:
         """Get transfer progress percentage
-        
+
         Args:
             transfer_id: Transfer ID
-            
+
         Returns:
             Completion percentage (0-100)
-            
+
         Raises:
             KeyError: If transfer ID does not exist
         """

@@ -80,7 +80,7 @@ class PacketProtocol:
 
         return checksum ^ 0xFFFF  # Invert
 
-    def pack(self, data: Union[bytes, dict], packet_type: PacketType = PacketType.DATA,
+    def pack(self, data: Union[bytes, Dict[str, Any]], packet_type: PacketType = PacketType.DATA,
              sequence: Optional[int] = None, flags: int = 0) -> bytes:
         """Pack data into a packet
 
@@ -95,22 +95,26 @@ class PacketProtocol:
         """
         # If data is a dictionary, convert to JSON
         if isinstance(data, dict):
-            data = json.dumps(data).encode('utf-8')
+            data_bytes = json.dumps(data).encode('utf-8')
+        else:
+            data_bytes = data
 
         compressed = 0
+        final_data = data_bytes
 
         # If compression is enabled and data size exceeds threshold, compress data
         if (self.compression_threshold > 0 and
-                len(data) > self.compression_threshold):
+                len(data_bytes) > self.compression_threshold):
             try:
-                compressed_data = zlib.compress(data, self.compression_level)
+                compressed_data_bytes = zlib.compress(
+                    data_bytes, self.compression_level)
 
                 # Only use compressed data if it's smaller
-                if len(compressed_data) < len(data):
-                    data = compressed_data
+                if len(compressed_data_bytes) < len(data_bytes):
+                    final_data = compressed_data_bytes
                     compressed = 1
                     logger.debug(
-                        f"Compressed data from {len(data)} to {len(compressed_data)} bytes")
+                        f"Compressed data from {len(data_bytes)} to {len(final_data)} bytes")
             except Exception as e:
                 logger.error(f"Failed to compress data: {e}")
 
@@ -126,11 +130,11 @@ class PacketProtocol:
             compressed,          # Compression flag
             sequence,            # Sequence number
             flags,               # Flags field
-            len(data)            # Data length
+            len(final_data)      # Data length
         )
 
         # Return complete packet
-        return header + data
+        return header + final_data
 
     def unpack(self, data: bytes) -> Tuple[PacketType, bytes, int, int, int]:
         """Unpack a packet
@@ -194,7 +198,7 @@ class PacketProtocol:
         except (json.JSONDecodeError, UnicodeDecodeError):
             return data
 
-    def create_packet(self, packet_type: PacketType, data: Union[bytes, dict],
+    def create_packet(self, packet_type: PacketType, data: Union[bytes, Dict[str, Any]],
                       sequence: Optional[int] = None, flags: int = 0) -> bytes:
         """Create a packet of the specified type
 
@@ -231,13 +235,13 @@ class PacketProtocol:
         Returns:
             Acknowledgment packet data
         """
-        data = {'ack_sequence': sequence}
+        ack_data: Dict[str, Any] = {'ack_sequence': sequence}
         if message_id:
-            data['message_id'] = message_id
+            ack_data['message_id'] = message_id
 
         return self.create_packet(
             PacketType.ACK,
-            data,
+            ack_data,
             sequence
         )
 
@@ -270,17 +274,17 @@ class PacketProtocol:
         Returns:
             Control packet data
         """
-        data = {
+        control_data: Dict[str, Any] = {
             'command': command,
             'timestamp': int(time.time())
         }
 
         if params:
-            data['params'] = params
+            control_data['params'] = params
 
-        return self.create_packet(PacketType.CONTROL, data)
+        return self.create_packet(PacketType.CONTROL, control_data)
 
-    def create_reliable_packet(self, data: Union[bytes, dict], message_id: str) -> bytes:
+    def create_reliable_packet(self, data: Union[bytes, Dict[str, Any]], message_id: str) -> bytes:
         """Create a reliable transmission packet
 
         Args:
@@ -291,13 +295,18 @@ class PacketProtocol:
             Reliable transmission packet data
         """
         if isinstance(data, dict):
-            data['_message_id'] = message_id
-            data['_timestamp'] = int(time.time())
-            return self.create_packet(PacketType.RELIABLE, data)
+            # Ensure we're working with a copy if 'data' might be reused elsewhere
+            payload_data = data.copy()
+            payload_data['_message_id'] = message_id
+            payload_data['_timestamp'] = int(time.time())
+            return self.create_packet(PacketType.RELIABLE, payload_data)
         else:
             # For binary data, add message ID to the header flags
-            header = json.dumps({'message_id': message_id}).encode('utf-8')
-            combined = header + b'\0' + data  # Use NULL byte as separator
+            # This approach of embedding JSON in binary might be complex; consider alternatives
+            # For now, sticking to the original logic but ensuring types are correct.
+            header_info = json.dumps(
+                {'message_id': message_id}).encode('utf-8')
+            combined = header_info + b'\0' + data  # Use NULL byte as separator
             return self.create_packet(PacketType.RELIABLE, combined)
 
     def create_fragment_packet(self, data: bytes, fragment_id: int,
@@ -313,14 +322,15 @@ class PacketProtocol:
         Returns:
             Fragment packet data
         """
-        header = json.dumps({
+        header_info_dict: Dict[str, Any] = {
             'fragment_id': fragment_id,
             'total_fragments': total_fragments,
             'original_seq': sequence,
             'timestamp': int(time.time())
-        }).encode('utf-8')
+        }
+        header_info_bytes = json.dumps(header_info_dict).encode('utf-8')
 
-        combined = header + b'\0' + data  # Use NULL byte as separator
+        combined = header_info_bytes + b'\0' + data  # Use NULL byte as separator
 
         # Use fragment ID as the high 8 bits of the sequence number to ensure fragment order
         fragment_sequence = ((fragment_id << 24) | (sequence & 0x00FFFFFF))

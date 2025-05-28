@@ -1,7 +1,6 @@
-import mmap
-from typing import Optional, List, Union, Deque
 import asyncio
-from loguru import logger
+# Use TypingDeque to avoid conflict if Deque is used elsewhere
+from typing import Optional, Union, Deque as TypingDeque
 from collections import deque
 
 
@@ -10,23 +9,25 @@ class PacketBuffer:
 
     def __init__(self, max_size: int = 16 * 1024 * 1024):
         """Initialize packet buffer
-        
+
         Args:
             max_size: Maximum buffer size in bytes (default 16 MB)
         """
         self._buffer = memoryview(bytearray(max_size))
-        self._read_pos = 0
-        self._write_pos = 0
+        self._read_pos: int = 0
+        self._write_pos: int = 0
         self._event = asyncio.Event()
         self._lock = asyncio.Lock()
-        self._small_buffer_cache = deque(maxlen=32)  # Small buffer cache to avoid frequent allocations
-        self._read_waiters = 0
-        self._stats = {
+        self._small_buffer_cache: TypingDeque[bytearray] = deque(
+            maxlen=32)  # Small buffer cache to avoid frequent allocations
+        self._read_waiters: int = 0
+        self._stats: dict[str, int] = {
             'compactions': 0,
             'appends': 0,
             'reads': 0,
             'cache_hits': 0,
             'cache_misses': 0,
+            'overflows': 0,  # Added overflows to match previous context if it was intended
         }
 
     def _get_available_space(self) -> int:
@@ -39,10 +40,10 @@ class PacketBuffer:
 
     async def append(self, data: Union[bytes, bytearray, memoryview]) -> None:
         """Append data to buffer with optimized zero-copy implementation
-        
+
         Args:
             data: Data to append to buffer
-            
+
         Raises:
             BufferError: If buffer overflow occurs
         """
@@ -58,12 +59,12 @@ class PacketBuffer:
             return
 
         async with self._lock:
-            available = self._get_available_space()
+            available: int = self._get_available_space()
             if data_len > available:
                 # Need to compact buffer
                 if self._read_pos > 0:
                     self._stats['compactions'] += 1
-                    remain = self._write_pos - self._read_pos
+                    remain: int = self._write_pos - self._read_pos
                     # Use memoryview for efficient copying
                     self._buffer[0:remain] = self._buffer[self._read_pos:self._write_pos]
                     self._write_pos = remain
@@ -72,6 +73,7 @@ class PacketBuffer:
 
                 # If still not enough space after compaction, raise error
                 if data_len > available:
+                    self._stats['overflows'] += 1
                     raise BufferError(
                         f"Buffer overflow: needed {data_len}, available {available}")
 
@@ -82,13 +84,13 @@ class PacketBuffer:
             if self._read_waiters > 0:
                 self._event.set()
 
-    async def read(self, size: int, timeout: float = None) -> Optional[bytes]:
+    async def read(self, size: int, timeout: Optional[float] = None) -> Optional[bytes]:
         """Read data from buffer with optimized zero-copy implementation
-        
+
         Args:
             size: Number of bytes to read
             timeout: Optional timeout in seconds
-            
+
         Returns:
             Read data or None if timeout occurred
         """
@@ -111,7 +113,7 @@ class PacketBuffer:
 
             # Use lock to protect read operation
             async with self._lock:
-                available = self._write_pos - self._read_pos
+                available: int = self._write_pos - self._read_pos
 
                 # Wait for data
                 if available < size:
@@ -131,7 +133,7 @@ class PacketBuffer:
                 # Use buffer pool for small buffers to reduce memory allocations
                 if available <= 4096 and self._small_buffer_cache:
                     self._stats['cache_hits'] += 1
-                    buf = self._small_buffer_cache.popleft()
+                    buf: bytearray = self._small_buffer_cache.popleft()
                     buf[0:available] = self._buffer[self._read_pos:self._read_pos + available]
                     result = bytes(buf[0:available])
                 else:
@@ -140,7 +142,9 @@ class PacketBuffer:
                         self._buffer[self._read_pos:self._read_pos + available])
 
                     # Cache small buffers for future use
-                    if available <= 4096 and len(self._small_buffer_cache) < self._small_buffer_cache.maxlen:
+                    if available <= 4096 and \
+                       self._small_buffer_cache.maxlen is not None and \
+                       len(self._small_buffer_cache) < self._small_buffer_cache.maxlen:
                         if not self._small_buffer_cache or len(self._small_buffer_cache[-1]) < available:
                             self._small_buffer_cache.append(
                                 bytearray(available))
@@ -155,9 +159,9 @@ class PacketBuffer:
         finally:
             self._read_waiters -= 1
 
-    def get_stats(self) -> dict:
+    def get_stats(self) -> dict[str, int]:
         """Get buffer statistics
-        
+
         Returns:
             Dictionary with buffer statistics
         """
@@ -176,13 +180,13 @@ class PacketBuffer:
         self._read_pos = 0
         self._write_pos = 0
         self._event.clear()
-        
+
     async def peek(self, size: int) -> Optional[bytes]:
         """Peek at data without removing it from buffer
-        
+
         Args:
             size: Number of bytes to peek
-            
+
         Returns:
             Peeked data or None if not enough data
         """

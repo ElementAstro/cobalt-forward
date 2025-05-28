@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable
 import time
 import json
 from .constants import MQTTQoS
@@ -60,7 +60,7 @@ class MQTTConfig:
     username: Optional[str] = None
     password: Optional[str] = None
     keepalive: int = 60
-    ssl_config: Optional[Dict] = None
+    ssl_config: Optional[Dict[str, Any]] = None
     clean_session: bool = True
     reconnect_delay: int = 5
     max_reconnect_attempts: int = -1  # -1 means infinite retries
@@ -90,7 +90,7 @@ class MQTTMessage:
     timestamp: float = field(default_factory=time.time)
     message_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     retry_count: int = 0
-    
+
     def to_json(self) -> str:
         """Convert message to JSON string"""
         return json.dumps({
@@ -121,7 +121,7 @@ class MQTTSubscription:
     """MQTT subscription information"""
     topic: str
     qos: MQTTQoS = MQTTQoS.AT_MOST_ONCE
-    callback: Optional[callable] = None
+    callback: Optional[Callable[..., Any]] = None
     created_at: float = field(default_factory=time.time)
 
 

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional, Union, List
+from typing import Dict, Any, List  # Removed Optional, Union
 from ..base import BaseConfig
 
 
@@ -114,7 +114,7 @@ class ClientConfig(BaseConfig):
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary"""
-        base_dict = {
+        base_dict: Dict[str, Any] = {
             "host": self.host,
             "port": self.port,
             "timeout": self.timeout,

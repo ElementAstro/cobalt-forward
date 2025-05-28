@@ -1,7 +1,7 @@
 from enum import Enum, auto
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
 
 class ClientState(Enum):
@@ -26,7 +26,7 @@ class ConnectionStats:
     messages_received: int = 0
     errors: int = 0
     reconnects: int = 0
-    latency: List[float] = field(default_factory=list)  # Recent latency measurements (ms)
+    latency: list[float] = field(default_factory=list)  # Recent latency measurements (ms)
 
     def add_latency_sample(self, latency_ms: float) -> None:
         """Add a latency sample"""

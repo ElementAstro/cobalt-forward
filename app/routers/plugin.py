@@ -4,7 +4,6 @@ from pydantic import BaseModel, Field, field_validator
 from app.plugin.plugin_manager import PluginManager
 from app.plugin.models import PluginMetadata, PluginState
 from app.plugin.dependencies import get_plugin_manager
-from app.core.exceptions import PluginError
 import asyncio
 import logging
 from datetime import datetime, timezone
@@ -182,7 +181,10 @@ async def reload_plugin(
             success = await plugin_manager.reload_plugin(plugin_name)
 
         if not success:
-            raise PluginError("Plugin reload failed")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Plugin reload failed"
+            )
 
         logger.info(f"Successfully reloaded plugin: {plugin_name}")
         return {
@@ -210,8 +212,33 @@ async def get_plugin_health(
     plugin_manager: PluginManager = Depends(get_plugin_manager)
 ):
     """Get plugin health status"""
-    health = await plugin_manager.get_plugin_health(plugin_name)
-    return health
+    try:
+        # Check if plugin exists and has health check capability
+        if plugin_name not in plugin_manager.plugins:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Plugin not found"
+            )
+
+        plugin = plugin_manager.plugins[plugin_name]
+        if hasattr(plugin, 'check_health'):
+            health = await plugin.check_health()
+        else:
+            health = {
+                "status": "unknown",
+                "plugin": plugin_name,
+                "message": "Health check not implemented"
+            }
+
+        return health
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get plugin health: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get plugin health: {str(e)}"
+        )
 
 
 @router.post("/{plugin_name}/config")
@@ -242,11 +269,28 @@ async def manage_plugin_permission(
     """Manage plugin permissions"""
     try:
         if action == "grant":
-            await plugin_manager.grant_permission(plugin_name, permission)
+            if plugin_manager.permission_manager:
+                plugin_manager.permission_manager.grant_permission(
+                    plugin_name, permission)
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                    detail="Permission management not implemented"
+                )
         else:
-            await plugin_manager.revoke_permission(plugin_name, permission)
+            if plugin_manager.permission_manager:
+                plugin_manager.permission_manager.revoke_permission(
+                    plugin_name, permission)
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                    detail="Permission management not implemented"
+                )
         return {"status": "success"}
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Error managing plugin permission: {e}", exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
 
 
@@ -256,10 +300,31 @@ async def get_plugin_metrics(
     plugin_manager: PluginManager = Depends(get_plugin_manager)
 ):
     """Get plugin performance metrics"""
-    metrics = plugin_manager.get_plugin_metrics(plugin_name)
-    if not metrics:
-        raise HTTPException(status_code=404, detail="Plugin metrics not found")
-    return metrics
+    try:
+        # Check if plugin exists
+        if plugin_name not in plugin_manager.plugins:
+            raise HTTPException(status_code=404, detail="Plugin not found")
+
+        plugin_status = plugin_manager.get_plugin_status(plugin_name)
+        metrics = plugin_status.get("metrics", {
+            "calls": 0,
+            "errors": 0,
+            "uptime": plugin_status.get("uptime", 0),
+            "memory_usage": 0
+        })
+
+        if not metrics:
+            raise HTTPException(
+                status_code=404, detail="Plugin metrics not found")
+        return metrics
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get plugin metrics: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get plugin metrics: {str(e)}"
+        )
 
 
 @router.post("/{plugin_name}/function/{function_name}")
@@ -271,10 +336,31 @@ async def call_plugin_function(
 ):
     """Call plugin function"""
     try:
-        result = await plugin_manager.call_plugin_function(plugin_name, function_name, **params)
+        # Check if plugin exists and has requested function
+        if plugin_name not in plugin_manager.plugins:
+            raise HTTPException(status_code=404, detail="Plugin not found")
+
+        plugin = plugin_manager.plugins[plugin_name]
+        if not hasattr(plugin, function_name):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Function '{function_name}' not found in plugin"
+            )
+
+        func = getattr(plugin, function_name)
+        if not callable(func):
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{function_name}' is not a callable function"
+            )
+
+        result = await func(**params) if asyncio.iscoroutinefunction(func) else func(**params)
+
         return {"status": "success", "result": result}
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error calling plugin function: {e}")
+        logger.error(f"Error calling plugin function: {e}", exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
 
 
@@ -291,7 +377,14 @@ async def enable_plugin(
                 detail=f"Plugin '{plugin_name}' does not exist"
             )
 
-        success = await plugin_manager.enable_plugin(plugin_name)
+        # Use load_plugin method to enable plugin
+        if hasattr(plugin_manager, 'load_plugin'):
+            success = await plugin_manager.load_plugin(plugin_name)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                detail="Plugin enable functionality not implemented"
+            )
 
         if not success:
             # If plugin is already enabled
@@ -335,7 +428,14 @@ async def disable_plugin(
                 detail=f"Plugin '{plugin_name}' does not exist"
             )
 
-        success = await plugin_manager.disable_plugin(plugin_name)
+        # Use unload_plugin method to disable plugin
+        if hasattr(plugin_manager, 'unload_plugin'):
+            success = await plugin_manager.unload_plugin(plugin_name)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                detail="Plugin disable functionality not implemented"
+            )
 
         if not success:
             # If plugin is already disabled
@@ -372,16 +472,13 @@ async def get_system_status(
 ):
     """Get plugin system status"""
     try:
-        if not hasattr(plugin_manager, 'get_system_status'):
-            # If method doesn't exist, try to manually build status info
-            system_status = {
-                "plugin_count": len(plugin_manager.plugins),
-                "loaded_plugins": len(plugin_manager.plugins),
-                "discovered_plugins": len(plugin_manager.plugin_metadata),
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            }
-        else:
-            system_status = plugin_manager.get_system_status()
+        # Build system status from available information
+        system_status = {
+            "plugin_count": len(plugin_manager.plugins),
+            "loaded_plugins": len(plugin_manager.plugins),
+            "discovered_plugins": len(plugin_manager.plugin_metadata),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
 
         return system_status
     except Exception as e:

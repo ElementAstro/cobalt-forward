@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, Optional
 from ..base import BaseConfig
 
 
@@ -44,10 +44,10 @@ class RetryPolicy:
 
     def get_retry_delay(self, attempt: int) -> float:
         """Calculate delay for the nth attempt using exponential backoff
-        
+
         Args:
             attempt: Attempt number (0-based)
-            
+
         Returns:
             Delay in seconds
         """
@@ -93,14 +93,14 @@ class ClientConfig(BaseConfig):
     compression_level: int = 6          # Compression level (0-9)
     use_tls: bool = False               # Use TLS encryption
     tls_verify: bool = True             # Verify TLS certificates
-    
+
     # Performance monitoring
     enable_metrics: bool = True         # Enable performance metrics collection
     metrics_interval: float = 60.0      # Metrics collection interval (seconds)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary"""
-        base_dict = {
+        base_dict: Dict[str, Any] = {
             "host": self.host,
             "port": self.port,
             "timeout": self.timeout,
@@ -127,26 +127,28 @@ class ClientConfig(BaseConfig):
             }
         }
         return base_dict
-    
+
     def validate(self) -> bool:
         """Validate configuration
-        
+
         Returns:
             True if configuration is valid
-            
+
         Raises:
             ValueError: If configuration is invalid
         """
         if self.port <= 0 or self.port > 65535:
             raise ValueError(f"Invalid port: {self.port}")
-            
+
         if self.timeout <= 0:
             raise ValueError(f"Invalid timeout: {self.timeout}")
-            
+
         if self.heartbeat_interval <= 0:
-            raise ValueError(f"Invalid heartbeat interval: {self.heartbeat_interval}")
-            
+            raise ValueError(
+                f"Invalid heartbeat interval: {self.heartbeat_interval}")
+
         if self.compression_level < 0 or self.compression_level > 9:
-            raise ValueError(f"Invalid compression level: {self.compression_level}")
-            
+            raise ValueError(
+                f"Invalid compression level: {self.compression_level}")
+
         return True

@@ -11,13 +11,13 @@ def create_ssl_context(
     verify_ssl: bool = True
 ) -> ssl.SSLContext:
     """Create SSL context for secure WebSocket connections.
-    
+
     Args:
         cert_path: Path to certificate file
         key_path: Path to private key file
         ca_path: Path to CA certificate file
         verify_ssl: Whether to verify SSL certificates
-        
+
     Returns:
         Configured SSL context
     """
@@ -39,10 +39,10 @@ def create_ssl_context(
 
 def parse_message(message: str) -> Any:
     """Parse received WebSocket message.
-    
+
     Args:
         message: Raw message received from WebSocket
-        
+
     Returns:
         Parsed message (dict, list or string)
     """
@@ -61,10 +61,10 @@ def parse_message(message: str) -> Any:
 
 def serialize_message(message: Any) -> str:
     """Serialize message for sending over WebSocket.
-    
+
     Args:
         message: Message to serialize (dict, list or string)
-        
+
     Returns:
         Serialized message string
     """
@@ -76,6 +76,6 @@ def serialize_message(message: Any) -> str:
             return json.dumps(message, ensure_ascii=False)
         except Exception as e:
             logger.warning(f"JSON serialization error: {e}")
-            return str(message)
+            return str(message)  # type: ignore[arg-type]
 
     return str(message)

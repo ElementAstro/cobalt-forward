@@ -1,12 +1,13 @@
 import json
 import zlib
 import time
-from typing import Any, Union, Dict, Callable, TypeVar, Awaitable
+from typing import Any, Union, Dict, Callable, TypeVar, Awaitable, Optional
 from functools import wraps, lru_cache
 from loguru import logger
 import asyncio
 
 T = TypeVar('T')
+P = TypeVar('P')
 
 
 @lru_cache(maxsize=1000)
@@ -49,10 +50,10 @@ def decompress_payload(payload: bytes) -> Union[str, bytes]:
         return zlib.decompress(payload)
 
 
-def measure_time(func):
+def measure_time(func: Callable[..., T]) -> Callable[..., T]:
     """Performance timing decorator"""
     @wraps(func)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: Any, **kwargs: Any) -> T:
         start = time.perf_counter()
         result = func(*args, **kwargs)
         end = time.perf_counter()
@@ -61,10 +62,10 @@ def measure_time(func):
     return wrapper
 
 
-def async_measure_time(func):
+def async_measure_time(func: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
     """Async performance timing decorator"""
     @wraps(func)
-    async def wrapper(*args, **kwargs):
+    async def wrapper(*args: Any, **kwargs: Any) -> T:
         start = time.perf_counter()
         result = await func(*args, **kwargs)
         end = time.perf_counter()
@@ -74,13 +75,13 @@ def async_measure_time(func):
 
 
 def create_ssl_config(
-    ca_certs: str = None,
-    certfile: str = None,
-    keyfile: str = None,
+    ca_certs: Optional[str] = None,
+    certfile: Optional[str] = None,
+    keyfile: Optional[str] = None,
     cert_reqs: bool = True
-) -> Dict:
+) -> Dict[str, Any]:
     """Create SSL configuration"""
-    ssl_config = {}
+    ssl_config: Dict[str, Any] = {}
     if ca_certs:
         ssl_config['ca_certs'] = ca_certs
     if certfile:
@@ -98,11 +99,11 @@ class CircuitBreaker:
         self._failures = 0
         self._threshold = failure_threshold
         self._reset_timeout = reset_timeout
-        self._last_failure_time = 0
+        self._last_failure_time = 0.0
         self._is_open = False
         self._lock = asyncio.Lock()
 
-    async def call(self, func: Callable[..., Awaitable[T]], *args, **kwargs) -> T:
+    async def call(self, func: Callable[..., Awaitable[T]], *args: Any, **kwargs: Any) -> T:
         """Execute function with circuit breaker protection"""
         async with self._lock:
             if self._is_open:
@@ -122,17 +123,18 @@ class CircuitBreaker:
         except Exception as e:
             await self._handle_failure()
             raise e
-            
-    async def _handle_failure(self):
+
+    async def _handle_failure(self) -> None:
         """Handle circuit breaker failure"""
         async with self._lock:
             self._failures += 1
             self._last_failure_time = time.time()
-            
+
             if self._failures >= self._threshold:
-                logger.warning(f"Circuit breaker opened after {self._failures} failures")
+                logger.warning(
+                    f"Circuit breaker opened after {self._failures} failures")
                 self._is_open = True
-                
+
     @property
     async def is_open(self) -> bool:
         """Check if circuit breaker is open"""
@@ -142,7 +144,7 @@ class CircuitBreaker:
                 self._failures = 0
                 return False
             return self._is_open
-            
+
     @property
     async def failure_count(self) -> int:
         """Get current failure count"""

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, validator
-from typing import Dict, Any, List, Optional
+from pydantic import BaseModel, Field, field_validator
+from typing import Dict, Any, List
 from uuid import uuid4
 import asyncio
 import time
@@ -16,7 +16,7 @@ class CommandData(BaseModel):
     priority: int = Field(default=0, ge=0, le=10)
     timeout: float = Field(default=30.0, ge=0)
 
-    @validator('type')
+    @field_validator('type')
     def validate_type(cls, v):
         allowed_types = {'control', 'query', 'config', 'reset'}
         if v not in allowed_types:
@@ -26,15 +26,14 @@ class CommandData(BaseModel):
 
 
 class BatchCommandRequest(BaseModel):
-    commands: List[CommandData] = Field(..., max_items=100)
+    commands: List[CommandData] = Field(..., max_length=100)
     parallel: bool = Field(default=False)
 
 
 router = APIRouter(prefix="/api", tags=["commands"])
 
 
-@router.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
+async def global_exception_handler(_request: Request, exc: Exception):
     """Global exception handler for all routes"""
     error_id = str(uuid4())
     logger.error(f"Error ID: {error_id} - {str(exc)}", exc_info=True)
@@ -46,16 +45,21 @@ async def global_exception_handler(request: Request, exc: Exception):
         }
     )
 
+router.add_exception_handler(Exception, global_exception_handler)
+
 
 @router.post("/schedule_command")
-async def schedule_command(command: CommandData):
+async def schedule_command(command: CommandData, request: Request):
     """Schedule a command for execution"""
     command_id = str(uuid4())
     logger.info(f"Scheduling command [id={command_id}] [type={command.type}]")
 
     try:
-        app = router.app
-        scheduled_command = app.forwarder.ScheduledCommand(command.dict())
+        app = request.app 
+        # Assuming app.forwarder has ScheduledCommand, command_transmitter, and scheduled_tasks
+        # If router.app() was intended, it implies a custom APIRouter or setup.
+        # Using request.app is the standard FastAPI way to get the app instance.
+        scheduled_command = app.forwarder.ScheduledCommand(**command.model_dump())
 
         # Create task with timeout
         task = asyncio.create_task(
@@ -89,41 +93,41 @@ async def schedule_command(command: CommandData):
 
 
 @router.post("/batch_command")
-async def batch_command(request: BatchCommandRequest):
+async def batch_command(batch_request: BatchCommandRequest, request: Request):
     """Execute multiple commands in batch"""
     batch_id = str(uuid4())
     logger.info(
-        f"Starting batch execution [id={batch_id}] [count={len(request.commands)}]")
+        f"Starting batch execution [id={batch_id}] [count={len(batch_request.commands)}]")
 
     try:
-        app = router.app
+        app = request.app
         start_time = time.perf_counter()
 
-        if request.parallel:
+        if batch_request.parallel:
             # Execute commands in parallel
             tasks = [
                 app.forwarder.command_transmitter.send(
-                    app.forwarder.BatchCommand([cmd.dict()])
+                    app.forwarder.BatchCommand([cmd.model_dump()])
                 )
-                for cmd in request.commands
+                for cmd in batch_request.commands
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
         else:
             # Execute commands sequentially
-            command = app.forwarder.BatchCommand(
-                [cmd.dict() for cmd in request.commands])
-            results = await app.forwarder.command_transmitter.send(command)
+            command_payload = app.forwarder.BatchCommand(
+                [cmd.model_dump() for cmd in batch_request.commands])
+            results = await app.forwarder.command_transmitter.send(command_payload)
 
         execution_time = (time.perf_counter() - start_time) * 1000
         logger.success(
             f"Batch execution completed [id={batch_id}] "
-            f"[time={execution_time:.2f}ms] [success={len(results)}]"
-        )
+            f"[time={execution_time:.2f}ms]"
+        ) # Removed success={len(results)} as results structure varies
 
         return {
             "batch_id": batch_id,
             "execution_time_ms": execution_time,
-            "results": results
+            "results": results # Ensure results are serializable
         }
 
     except Exception as e:
@@ -135,26 +139,26 @@ async def batch_command(request: BatchCommandRequest):
 
 
 @router.post("/device/control")
-async def device_control(command: CommandData):
+async def device_control(command: CommandData, request: Request):
     """Control device with specified command"""
     operation_id = str(uuid4())
     logger.info(
         f"Device control operation [id={operation_id}] [type={command.type}]")
 
     try:
-        app = router.app
-        control_command = app.forwarder.DeviceControlCommand(command.dict())
+        app = request.app
+        control_command_payload = app.forwarder.DeviceControlCommand(**command.model_dump())
 
         # Execute with timeout
         result = await asyncio.wait_for(
-            app.forwarder.command_transmitter.send(control_command),
+            app.forwarder.command_transmitter.send(control_command_payload),
             timeout=command.timeout
         )
 
         logger.success(f"Device control successful [id={operation_id}]")
         return {
             "operation_id": operation_id,
-            "result": result.result
+            "result": result.result # Assuming result has a 'result' attribute
         }
 
     except asyncio.TimeoutError:
@@ -167,25 +171,25 @@ async def device_control(command: CommandData):
 
 
 @router.post("/data/query")
-async def data_query(query: CommandData):
+async def data_query(query: CommandData, request: Request):
     """Query device data"""
     query_id = str(uuid4())
     logger.info(f"Data query operation [id={query_id}] [type={query.type}]")
 
     try:
-        app = router.app
-        query_command = app.forwarder.DataQueryCommand(query.dict())
+        app = request.app
+        query_command_payload = app.forwarder.DataQueryCommand(**query.model_dump())
 
         # Execute with timeout
         result = await asyncio.wait_for(
-            app.forwarder.command_transmitter.send(query_command),
+            app.forwarder.command_transmitter.send(query_command_payload),
             timeout=query.timeout
         )
 
         logger.success(f"Data query successful [id={query_id}]")
         return {
             "query_id": query_id,
-            "data": result.result
+            "data": result.result # Assuming result has a 'result' attribute
         }
 
     except asyncio.TimeoutError:

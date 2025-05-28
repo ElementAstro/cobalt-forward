@@ -1,6 +1,5 @@
-import asyncio
 import struct
-from typing import Optional, Union, Dict, Tuple, Any, List
+from typing import Optional, Union, Dict, Tuple, Any
 import zlib
 from loguru import logger
 import time
@@ -19,13 +18,13 @@ class PacketType(IntEnum):
 
 class PacketProtocol:
     """Packet protocol handler class
-    
+
     Packet format:
     +--------+--------+--------+----------+----------------+
     | Magic  | Type   | Compr. | Data Len | Data           |
     | 2 bytes| 1 byte | 1 byte | 4 bytes  | Variable       |
     +--------+--------+--------+----------+----------------+
-    
+
     Magic: Fixed as 0xCB55 (CoBalt 55)
     Type: Packet type, see PacketType
     Compression flag: 0=uncompressed, 1=zlib compressed
@@ -39,51 +38,54 @@ class PacketProtocol:
 
     def __init__(self, compression_threshold: int = 1024, compression_level: int = 6):
         """Initialize protocol handler
-        
+
         Args:
             compression_threshold: Threshold for enabling compression
             compression_level: Compression level (0-9)
         """
         self.compression_threshold = compression_threshold
         self.compression_level = compression_level
-        logger.debug(f"Initialized PacketProtocol with compression_threshold={compression_threshold}, compression_level={compression_level}")
+        logger.debug(
+            f"Initialized PacketProtocol with compression_threshold={compression_threshold}, compression_level={compression_level}")
 
     @staticmethod
     def calculate_checksum(data: bytes) -> int:
         """Calculate checksum for data verification
-        
+
         Args:
             data: Data to calculate checksum for
-            
+
         Returns:
             Checksum value
         """
         # Simple CRC32 checksum
         return zlib.crc32(data) & 0xFFFFFFFF
 
-    def pack(self, data: Union[bytes, dict], packet_type: PacketType = PacketType.DATA) -> bytes:
+    def pack(self, data: Union[bytes, Dict[str, Any]], packet_type: PacketType = PacketType.DATA) -> bytes:
         """Pack data into binary format
-        
+
         Args:
             data: Data to send, can be bytes or dictionary
             packet_type: Packet type
-            
+
         Returns:
             Packed binary data
         """
         # Convert dictionary to JSON
         if isinstance(data, dict):
             data = json.dumps(data).encode('utf-8')
-            
+
         # Determine if compression should be used
         compressed = 0
-        if len(data) >= self.compression_threshold:
+        original_len = len(data)  # Store original length for logging
+        if original_len >= self.compression_threshold:
             compressed_data = zlib.compress(data, self.compression_level)
             # Only use compressed data if it's actually smaller
-            if len(compressed_data) < len(data):
+            if len(compressed_data) < original_len:
                 data = compressed_data
                 compressed = 1
-                logger.debug(f"Compressed data from {len(data)} to {len(compressed_data)} bytes")
+                logger.debug(
+                    f"Compressed data from {original_len} to {len(data)} bytes")
 
         # Construct packet header
         header = struct.pack(self.HEADER_FORMAT, self.MAGIC,
@@ -94,13 +96,13 @@ class PacketProtocol:
 
     def unpack(self, data: bytes) -> Tuple[PacketType, bytes, int]:
         """Unpack binary data
-        
+
         Args:
             data: Received binary data
-            
+
         Returns:
             Tuple (packet_type, data_body, header_size)
-            
+
         Raises:
             ValueError: If data format is invalid
         """
@@ -129,7 +131,8 @@ class PacketProtocol:
         if compressed:
             try:
                 body = zlib.decompress(body)
-                logger.debug(f"Decompressed data from {length} to {len(body)} bytes")
+                logger.debug(
+                    f"Decompressed data from {length} to {len(body)} bytes")
             except zlib.error as e:
                 logger.error(f"Failed to decompress data: {e}")
                 raise ValueError(f"Decompression failed: {e}")
@@ -143,13 +146,13 @@ class PacketProtocol:
         except (json.JSONDecodeError, UnicodeDecodeError):
             return data
 
-    def create_packet(self, packet_type: PacketType, data: Union[bytes, dict]) -> bytes:
+    def create_packet(self, packet_type: PacketType, data: Union[bytes, Dict[str, Any]]) -> bytes:
         """Create a packet with the specified type and data
-        
+
         Args:
             packet_type: Type of packet to create
             data: Data to include in packet
-            
+
         Returns:
             Complete packet as bytes
         """
@@ -162,7 +165,7 @@ class PacketProtocol:
 
     def create_ack(self, message_id: Optional[str] = None) -> bytes:
         """Create acknowledgment packet"""
-        data = {'timestamp': time.time()}
+        data: Dict[str, Any] = {'timestamp': time.time()}
         if message_id:
             data['message_id'] = message_id
         return self.pack(data, PacketType.ACK)
@@ -177,19 +180,19 @@ class PacketProtocol:
 
     def create_control_packet(self, command: str, params: Optional[Dict[str, Any]] = None) -> bytes:
         """Create control packet
-        
+
         Args:
             command: Control command
             params: Optional command parameters
-            
+
         Returns:
             Control packet as bytes
         """
-        data = {
+        data: Dict[str, Any] = {
             'command': command,
             'timestamp': time.time()
         }
         if params:
             data['params'] = params
-        
+
         return self.pack(data, PacketType.CONTROL)

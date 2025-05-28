@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Dict, Any, Optional, List, Callable, Coroutine, Union
+from typing import Dict, Any, Optional, List, Callable, Coroutine
 import yaml
 from pathlib import Path
 import asyncio
@@ -26,14 +26,14 @@ class ConfigManager:
     - Hot reloading and change notifications
     - Encryption and backup capabilities
     - Versioning and rollback support
-    
+
     Supports observers pattern for change notifications to dependent components.
     """
 
     def __init__(self, config_path: str, encrypt: bool = False):
         """
         Initialize the configuration manager.
-        
+
         Args:
             config_path: Path to the configuration file
             encrypt: Whether to encrypt the configuration file
@@ -64,7 +64,8 @@ class ConfigManager:
         self._load_schema()
         self.file_watcher = FileWatcher(self.config_path, self)
 
-        logger.info(f"ConfigManager initialized with config path: {config_path}")
+        logger.info(
+            f"ConfigManager initialized with config path: {config_path}")
 
     def _load_schema(self):
         """
@@ -93,37 +94,40 @@ class ConfigManager:
         """
         Register plugin-specific schema fragments for validation.
         Allows plugins to extend config validation without modifying core schema.
-        
+
         Args:
             plugin_id: Unique identifier for the plugin
             schema_fragment: JSON schema fragment to validate plugin config
-            
+
         Returns:
             True if registration succeeded, False otherwise
         """
         try:
             logger.debug(f"Registering schema for plugin: {plugin_id}")
             if plugin_id in self._plugin_schemas:
-                logger.warning(f"Schema for plugin {plugin_id} already exists, overwriting")
-            
+                logger.warning(
+                    f"Schema for plugin {plugin_id} already exists, overwriting")
+
             # Validate schema fragment
             jsonschema.Draft7Validator.check_schema(schema_fragment)
-            
+
             # Store plugin schema
             self._plugin_schemas[plugin_id] = schema_fragment
-            logger.info(f"Schema for plugin {plugin_id} registered successfully")
+            logger.info(
+                f"Schema for plugin {plugin_id} registered successfully")
             return True
         except Exception as e:
-            logger.error(f"Failed to register schema for plugin {plugin_id}: {e}")
+            logger.error(
+                f"Failed to register schema for plugin {plugin_id}: {e}")
             return False
 
     def unregister_plugin_schema(self, plugin_id: str) -> bool:
         """
         Unregister plugin schema when plugin is disabled.
-        
+
         Args:
             plugin_id: Unique identifier for the plugin
-            
+
         Returns:
             True if unregistration succeeded, False if plugin not found
         """
@@ -137,11 +141,11 @@ class ConfigManager:
     def get_config_value(self, key: str, default=None) -> Any:
         """
         Get configuration value with caching for performance.
-        
+
         Args:
             key: Configuration key
             default: Default value if key doesn't exist
-            
+
         Returns:
             Configuration value or default if not found
         """
@@ -157,10 +161,10 @@ class ConfigManager:
     def get_plugin_config(self, plugin_id: str) -> Dict[str, Any]:
         """
         Get plugin-specific configuration section.
-        
+
         Args:
             plugin_id: Unique identifier for the plugin
-            
+
         Returns:
             Dictionary containing plugin configuration or empty dict if not found
         """
@@ -171,48 +175,51 @@ class ConfigManager:
     def _validate_config(self, config_data: dict) -> bool:
         """
         Validate configuration data against schema.
-        
+
         Args:
             config_data: Configuration data to validate
-            
+
         Returns:
             True if valid, False otherwise
         """
         try:
             # Validate against core schema
             jsonschema.validate(instance=config_data, schema=self.schema)
-            
+
             # Validate against plugin schemas if plugins section exists
             if "plugins" in config_data:
                 for plugin_id, plugin_schema in self._plugin_schemas.items():
-                    plugin_config = config_data.get("plugins", {}).get(plugin_id)
+                    plugin_config = config_data.get(
+                        "plugins", {}).get(plugin_id)
                     if plugin_config:
                         try:
                             jsonschema.validate(
-                                instance=plugin_config, 
+                                instance=plugin_config,
                                 schema=plugin_schema
                             )
-                        except jsonschema.exceptions.ValidationError as e:
-                            logger.error(f"Plugin {plugin_id} config validation failed: {e}")
+                        except jsonschema.ValidationError as e:
+                            logger.error(
+                                f"Plugin {plugin_id} config validation failed: {e}")
                             return False
-                            
+
             return True
-        except jsonschema.exceptions.ValidationError as e:
+        except jsonschema.ValidationError as e:
             logger.error(f"Configuration validation failed: {e}")
             return False
 
     def _compress_config(self, config_data: str) -> bytes:
         """
         Compress configuration data to save space.
-        
+
         Args:
             config_data: String configuration data
-            
+
         Returns:
             Compressed bytes
         """
         try:
-            return zlib.compress(config_data.encode(), level=9)  # Maximum compression level
+            # Maximum compression level
+            return zlib.compress(config_data.encode(), level=9)
         except Exception as e:
             logger.error(f"Configuration compression failed: {e}")
             return config_data.encode()  # Return uncompressed data on failure
@@ -220,10 +227,10 @@ class ConfigManager:
     def _decompress_config(self, compressed_data: bytes) -> str:
         """
         Decompress configuration data.
-        
+
         Args:
             compressed_data: Compressed configuration data
-            
+
         Returns:
             Decompressed string data
         """
@@ -240,7 +247,7 @@ class ConfigManager:
     async def create_backup(self) -> Path:
         """
         Create configuration backup.
-        
+
         Returns:
             Path to created backup file
         """
@@ -254,7 +261,7 @@ class ConfigManager:
     async def restore_from_backup(self, backup_path: Path) -> None:
         """
         Restore configuration from backup.
-        
+
         Args:
             backup_path: Path to backup file
         """
@@ -262,13 +269,14 @@ class ConfigManager:
             metadata = self.backup_manager.restore_backup(
                 backup_path, self.config_path)
             await self.load_config()
-            logger.info(f"Configuration restored from backup, version: {metadata.get('version', 'unknown')}")
+            logger.info(
+                f"Configuration restored from backup, version: {metadata.get('version', 'unknown')}")
             self._config_loaded.set()
 
     def _load_default_config(self) -> RuntimeConfig:
         """
         Load default configuration.
-        
+
         Returns:
             Default RuntimeConfig object
         """
@@ -290,7 +298,8 @@ class ConfigManager:
         async with self._lock:
             try:
                 if self.config_path.exists() and os.path.getsize(self.config_path) > 0:
-                    logger.debug(f"Loading configuration from {self.config_path}")
+                    logger.debug(
+                        f"Loading configuration from {self.config_path}")
 
                     # Read file content
                     with open(self.config_path, 'rb') as f:
@@ -308,7 +317,8 @@ class ConfigManager:
 
                     # Validate configuration
                     if not self._validate_config(config_data):
-                        logger.warning("Configuration validation failed, using defaults")
+                        logger.warning(
+                            "Configuration validation failed, using defaults")
                         self.runtime_config = self._load_default_config()
                     else:
                         self.runtime_config = RuntimeConfig(**config_data)
@@ -317,14 +327,16 @@ class ConfigManager:
                     self._cache.clear()
                     logger.info("Configuration loaded successfully")
                 else:
-                    logger.warning(f"Configuration file doesn't exist or is empty: {self.config_path}, creating default")
+                    logger.warning(
+                        f"Configuration file doesn't exist or is empty: {self.config_path}, creating default")
                     self.runtime_config = self._load_default_config()
                     await self.save_config()
 
                 self._config_loaded.set()
 
             except Exception as e:
-                logger.error(f"Failed to load configuration: {str(e)}", exc_info=True)
+                logger.error(
+                    f"Failed to load configuration: {str(e)}", exc_info=True)
                 # Use default configuration on failure
                 self.runtime_config = self._load_default_config()
                 self._config_loaded.set()
@@ -383,17 +395,18 @@ class ConfigManager:
                 logger.info("Configuration saved successfully")
 
             except Exception as e:
-                logger.error(f"Failed to save configuration: {str(e)}", exc_info=True)
+                logger.error(
+                    f"Failed to save configuration: {str(e)}", exc_info=True)
                 raise
 
     async def update_plugin_config(self, plugin_id: str, config: Dict[str, Any]) -> bool:
         """
         Update plugin-specific configuration section.
-        
+
         Args:
             plugin_id: Unique identifier for the plugin
             config: New configuration for the plugin
-            
+
         Returns:
             True if update succeeded, False otherwise
         """
@@ -402,14 +415,14 @@ class ConfigManager:
                 logger.debug(f"Updating configuration for plugin: {plugin_id}")
                 # Get current config
                 current_config = asdict(self.runtime_config)
-                
+
                 # Initialize plugins section if it doesn't exist
                 if "plugins" not in current_config:
                     current_config["plugins"] = {}
-                
+
                 # Update plugin config
                 current_config["plugins"][plugin_id] = config
-                
+
                 # Validate plugin config if schema exists
                 if plugin_id in self._plugin_schemas:
                     try:
@@ -417,28 +430,31 @@ class ConfigManager:
                             instance=config,
                             schema=self._plugin_schemas[plugin_id]
                         )
-                    except jsonschema.exceptions.ValidationError as e:
-                        logger.error(f"Plugin {plugin_id} config validation failed: {e}")
+                    except jsonschema.ValidationError as e:
+                        logger.error(
+                            f"Plugin {plugin_id} config validation failed: {e}")
                         return False
-                
+
                 # Update and save config
                 self.runtime_config = RuntimeConfig(**current_config)
                 await self.save_config()
                 await self._notify_observers()
-                
-                logger.info(f"Configuration for plugin {plugin_id} updated successfully")
+
+                logger.info(
+                    f"Configuration for plugin {plugin_id} updated successfully")
                 return True
             except Exception as e:
-                logger.error(f"Failed to update plugin {plugin_id} configuration: {e}")
+                logger.error(
+                    f"Failed to update plugin {plugin_id} configuration: {e}")
                 return False
 
     async def update_config(self, new_config: Dict[str, Any]) -> bool:
         """
         Update configuration with new values.
-        
+
         Args:
             new_config: Dictionary of new configuration values
-            
+
         Returns:
             True if update succeeded, False otherwise
         """
@@ -450,7 +466,8 @@ class ConfigManager:
 
                 # Validate updated configuration
                 if not self._validate_config(current_config):
-                    logger.error("Configuration update failed: invalid configuration values")
+                    logger.error(
+                        "Configuration update failed: invalid configuration values")
                     return False
 
                 self.runtime_config = RuntimeConfig(**current_config)
@@ -466,10 +483,10 @@ class ConfigManager:
     async def rollback_to_version(self, version: str) -> bool:
         """
         Rollback to specific version from history.
-        
+
         Args:
             version: Version string to rollback to
-            
+
         Returns:
             True if rollback succeeded, False if version not found
         """
@@ -489,7 +506,7 @@ class ConfigManager:
     async def repair_config(self) -> bool:
         """
         Repair corrupted configuration.
-        
+
         Returns:
             True if repair succeeded, False otherwise
         """
@@ -520,10 +537,10 @@ class ConfigManager:
     def register_observer(self, callback: ObserverCallable) -> bool:
         """
         Register configuration change observer.
-        
+
         Args:
             callback: Async callback function to notify on changes
-            
+
         Returns:
             True if registration succeeded, False otherwise
         """
@@ -542,10 +559,10 @@ class ConfigManager:
     def unregister_observer(self, callback: ObserverCallable) -> bool:
         """
         Unregister configuration change observer.
-        
+
         Args:
             callback: The callback to unregister
-            
+
         Returns:
             True if successfully unregistered, False if not found
         """
@@ -578,7 +595,7 @@ class ConfigManager:
     async def _notify_single_observer(self, observer: ObserverCallable) -> None:
         """
         Notify a single observer with error handling.
-        
+
         Args:
             observer: Observer callback to notify
         """
@@ -587,7 +604,8 @@ class ConfigManager:
             await observer(self.runtime_config)
             logger.debug(f"Observer {observer_name} notification succeeded")
         except Exception as e:
-            logger.error(f"Observer {observer_name} notification failed: {str(e)}", exc_info=True)
+            logger.error(
+                f"Observer {observer_name} notification failed: {str(e)}", exc_info=True)
 
     async def _reload_config(self):
         """
@@ -607,13 +625,13 @@ class ConfigManager:
             except Exception as e:
                 logger.error(f"Configuration reload failed: {e}")
 
-    async def wait_for_config(self, timeout: float = None) -> bool:
+    async def wait_for_config(self, timeout: Optional[float] = None) -> bool:
         """
         Wait for configuration to be loaded.
-        
+
         Args:
             timeout: Optional timeout in seconds
-            
+
         Returns:
             True if config loaded, False if timeout occurred
         """
@@ -623,7 +641,8 @@ class ConfigManager:
             else:
                 return await self._config_loaded.wait()
         except asyncio.TimeoutError:
-            logger.warning(f"Timed out waiting for configuration to load after {timeout}s")
+            logger.warning(
+                f"Timed out waiting for configuration to load after {timeout}s")
             return False
 
     def start_hot_reload(self):
@@ -647,7 +666,7 @@ class ConfigManager:
         self.start_hot_reload()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(self, _exc_type, _exc_val, _exc_tb):
         """
         Support for async context manager.
         """

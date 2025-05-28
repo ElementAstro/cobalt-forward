@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 import asyncio
 from pathlib import Path
-from watchdog.observers.api import BaseObserver as Observer
+from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from loguru import logger
 import time
@@ -74,10 +76,11 @@ class FileWatcher:
             except Exception as e:
                 logger.error(
                     f"Failed to start watcher (attempt {attempt + 1}/{self._retry_count}): {e}")
-                if self._observer:
+                observer = self._observer
+                if observer is not None:
                     try:
-                        self._observer.stop()
-                        self._observer.join(timeout=1.0)
+                        observer.stop()
+                        observer.join(timeout=1.0)
                     except:
                         pass
                     self._observer = None
@@ -86,22 +89,23 @@ class FileWatcher:
 
     def start(self):
         """Start file watcher"""
-        if not self._observer:
+        if self._observer is None:
             try:
                 self.watch_handler = ConfigFileHandler(self.config_manager)
-                self._observer = Observer()
+                observer = Observer()
+                self._observer = observer
 
                 # Ensure directory exists
                 watch_dir = self.config_path.parent
                 if not watch_dir.exists():
                     watch_dir.mkdir(parents=True, exist_ok=True)
 
-                self._observer.schedule(
+                observer.schedule(
                     self.watch_handler,
                     str(watch_dir),
                     recursive=False
                 )
-                self._observer.start()
+                observer.start()
                 self._is_running = True
                 logger.info("Configuration file watcher started")
             except Exception as e:
@@ -111,10 +115,11 @@ class FileWatcher:
 
     def stop(self):
         """Stop file watcher"""
-        if self._observer:
+        observer = self._observer
+        if observer is not None:
             try:
-                self._observer.stop()
-                self._observer.join(timeout=2.0)
+                observer.stop()
+                observer.join(timeout=2.0)
                 logger.info("Configuration file watcher stopped")
             except Exception as e:
                 logger.error(f"Error stopping watcher: {e}")

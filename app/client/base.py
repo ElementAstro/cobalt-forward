@@ -1,6 +1,7 @@
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Type, Awaitable
+from types import TracebackType
 from loguru import logger
 import time
 from threading import Lock
@@ -28,16 +29,16 @@ class PerformanceMetrics:
     """性能指标收集"""
 
     def __init__(self):
-        self.start_time = time.time()
-        self.total_requests = 0
-        self.failed_requests = 0
-        self.total_bytes_sent = 0
-        self.total_bytes_received = 0
-        self.response_times = []
-        self._lock = Lock()
+        self.start_time: float = time.time()
+        self.total_requests: int = 0
+        self.failed_requests: int = 0
+        self.total_bytes_sent: int = 0
+        self.total_bytes_received: int = 0
+        self.response_times: List[float] = []
+        self._lock: Lock = Lock()
 
     def record_request(self, success: bool, bytes_sent: int = 0,
-                       bytes_received: int = 0, response_time: float = 0):
+                       bytes_received: int = 0, response_time: float = 0) -> None:
         with self._lock:
             self.total_requests += 1
             if not success:
@@ -51,11 +52,11 @@ class PerformanceMetrics:
         with self._lock:
             elapsed_time = time.time() - self.start_time
             avg_response_time = sum(
-                self.response_times) / len(self.response_times) if self.response_times else 0
+                self.response_times) / len(self.response_times) if self.response_times else 0.0
 
             return {
                 'total_requests': self.total_requests,
-                'requests_per_second': self.total_requests / elapsed_time,
+                'requests_per_second': self.total_requests / elapsed_time if elapsed_time > 0 else 0,
                 'failure_rate': self.failed_requests / max(1, self.total_requests),
                 'total_bytes_sent': self.total_bytes_sent,
                 'total_bytes_received': self.total_bytes_received,
@@ -67,14 +68,15 @@ class BaseClient(ABC):
     """基础客户端类"""
 
     def __init__(self, config: BaseConfig):
-        self.config = config
-        self.connected = False
-        self.metrics = PerformanceMetrics()
-        self.connection_pool = queue.Queue(maxsize=config.max_connections)
-        self._lock = Lock()
-        self._executor = ThreadPoolExecutor(max_workers=4)
-        self._callbacks: Dict[str, list[Callable]] = {}
-        self.loop = asyncio.get_event_loop()
+        self.config: BaseConfig = config
+        self.connected: bool = False
+        self.metrics: PerformanceMetrics = PerformanceMetrics()
+        self.connection_pool: queue.Queue[Any] = queue.Queue(
+            maxsize=config.max_connections)
+        self._lock: Lock = Lock()
+        self._executor: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=4)
+        self._callbacks: Dict[str, List[Callable[..., Any]]] = {}
+        self.loop: asyncio.AbstractEventLoop = asyncio.get_event_loop()
 
     @abstractmethod
     async def connect(self) -> bool:
@@ -96,20 +98,24 @@ class BaseClient(ABC):
         """接收数据"""
         pass
 
-    def add_callback(self, event: str, callback: Callable) -> None:
+    def add_callback(self, event: str, callback: Callable[..., Any]) -> None:
         """添加事件回调"""
         with self._lock:
             if event not in self._callbacks:
                 self._callbacks[event] = []
             self._callbacks[event].append(callback)
 
-    def remove_callback(self, event: str, callback: Callable) -> None:
+    def remove_callback(self, event: str, callback: Callable[..., Any]) -> None:
         """移除事件回调"""
         with self._lock:
             if event in self._callbacks:
-                self._callbacks[event].remove(callback)
+                try:
+                    self._callbacks[event].remove(callback)
+                except ValueError:
+                    logger.warning(
+                        f"Callback {callback} not found for event {event}")
 
-    async def _trigger_callbacks(self, event: str, *args, **kwargs) -> None:
+    async def _trigger_callbacks(self, event: str, *args: Any, **kwargs: Any) -> None:
         """触发事件回调"""
         callbacks = self._callbacks.get(event, [])
         for callback in callbacks:
@@ -122,14 +128,14 @@ class BaseClient(ABC):
             except Exception as e:
                 logger.error(f"Callback error: {str(e)}")
 
-    def _get_connection(self):
+    def _get_connection(self) -> Any:
         """从连接池获取连接"""
         try:
             return self.connection_pool.get(timeout=self.config.connection_timeout)
         except queue.Empty:
             raise ConnectionError("No available connections")
 
-    def _return_connection(self, conn):
+    def _return_connection(self, conn: Any) -> None:
         """归还连接到连接池"""
         try:
             self.connection_pool.put(conn, timeout=1)
@@ -156,12 +162,13 @@ class BaseClient(ABC):
 
         return False
 
-    async def execute_with_retry(self, operation: Callable, *args, **kwargs) -> Any:
+    async def execute_with_retry(self, operation: Callable[..., Awaitable[Any]], *args: Any, **kwargs: Any) -> Any:
         """通用重试执行方法"""
         start_time = time.time()
+        last_exception: Optional[Exception] = None
         for attempt in range(self.config.retry_attempts):
             try:
-                result = await operation(*args, **kwargs)
+                result: Any = await operation(*args, **kwargs)
                 self.metrics.record_request(
                     success=True,
                     response_time=time.time() - start_time
@@ -169,6 +176,7 @@ class BaseClient(ABC):
                 return result
             except Exception as e:
                 logger.error(f"Operation failed: {str(e)}")
+                last_exception = e
                 self.metrics.record_request(
                     success=False,
                     response_time=time.time() - start_time
@@ -176,22 +184,45 @@ class BaseClient(ABC):
                 if attempt < self.config.retry_attempts - 1:
                     await asyncio.sleep(self.config.retry_interval)
                 else:
-                    raise
+                    raise last_exception
 
-    def __enter__(self):
+    def __enter__(self) -> "BaseClient":
         """上下文管理器支持"""
-        asyncio.run(self.connect())
+        # Consider if connect should be blocking here or if the user should manage the event loop
+        # For simplicity, using asyncio.run, but this might not be ideal in all contexts.
+        if self.loop.is_running():
+            # If loop is already running, cannot use asyncio.run.
+            # This part needs careful consideration based on how the client is used.
+            # For now, let's assume it's called from a non-async context where a new loop can be started.
+            # Or, the user is expected to call connect explicitly if in an async context.
+            logger.warning(
+                "Entering BaseClient in a running event loop. Consider calling connect() explicitly.")
+        else:
+            self.loop.run_until_complete(self.connect())
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self,
+                 exc_type: Optional[Type[BaseException]],
+                 exc_val: Optional[BaseException],
+                 exc_tb: Optional[TracebackType]) -> Optional[bool]:
         """退出上下文管理器"""
-        asyncio.run(self.disconnect())
+        if self.loop.is_running():
+            # Similar to __enter__, handling disconnect in a running loop.
+            logger.warning(
+                "Exiting BaseClient in a running event loop. Consider calling disconnect() explicitly.")
+        else:
+            self.loop.run_until_complete(self.disconnect())
+        return None  # Returning None means exceptions are not suppressed
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> "BaseClient":
         """异步上下文管理器支持"""
         await self.connect()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(self,
+                        exc_type: Optional[Type[BaseException]],
+                        exc_val: Optional[BaseException],
+                        exc_tb: Optional[TracebackType]) -> Optional[bool]:
         """退出异步上下文管理器"""
         await self.disconnect()
+        return None  # Returning None means exceptions are not suppressed

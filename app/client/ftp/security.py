@@ -22,16 +22,14 @@ from cryptography.hazmat.primitives.serialization import (
     NoEncryption
 )
 import base64
-import uuid
-import tempfile
-from typing import Tuple, Optional, Dict, Any
+from typing import Tuple, Optional
 from loguru import logger
 
 
 class SecurityEnhancer:
-    def __init__(self, key_dir: str = None):
+    def __init__(self, key_dir: Optional[str] = None):
         """Initialize security enhancer
-        
+
         Args:
             key_dir: Directory for key storage
         """
@@ -58,7 +56,7 @@ class SecurityEnhancer:
 
     def _init_ciphers(self):
         """Initialize encryption ciphers"""
-        self.aes_gcm = AESGCM(AESGCM.generate_key(bit_length=256))
+        self.aes_gcm = AESGCM(AESGCM.generate_key(key_size=256))
         self._update_key_timestamp = time.time()
 
     @property
@@ -68,11 +66,11 @@ class SecurityEnhancer:
 
     def create_ssl_context(self, cert_file: str, key_file: str) -> ssl.SSLContext:
         """Create SSL context for secure communications
-        
+
         Args:
             cert_file: Certificate file path
             key_file: Key file path
-            
+
         Returns:
             Configured SSL context
         """
@@ -82,14 +80,14 @@ class SecurityEnhancer:
 
     def encrypt_file(self, file_path: str, key_path: Optional[str] = None) -> str:
         """Encrypt a file
-        
+
         Args:
             file_path: Path of file to encrypt
             key_path: Optional path to public key, uses session key if not provided
-            
+
         Returns:
             Path to encrypted file
-            
+
         Raises:
             Exception: If encryption fails
         """
@@ -105,6 +103,10 @@ class SecurityEnhancer:
                         key_file.read(),
                         backend=default_backend()
                     )
+
+                # Ensure we have an RSA public key for encryption
+                if not isinstance(public_key, rsa.RSAPublicKey):
+                    raise ValueError("Only RSA public keys support encryption")
 
                 # For large files, use hybrid encryption: random AES key + RSA
                 file_key = Fernet.generate_key()
@@ -143,15 +145,15 @@ class SecurityEnhancer:
     def decrypt_file(self, encrypted_path: str, output_path: Optional[str] = None,
                      private_key_path: Optional[str] = None) -> str:
         """Decrypt a file
-        
+
         Args:
             encrypted_path: Path to encrypted file
             output_path: Output file path
             private_key_path: Path to private key
-            
+
         Returns:
             Path to decrypted file
-            
+
         Raises:
             Exception: If decryption fails
         """
@@ -168,6 +170,11 @@ class SecurityEnhancer:
                             password=None,
                             backend=default_backend()
                         )
+
+                    # Ensure we have an RSA private key for decryption
+                    if not isinstance(private_key, rsa.RSAPrivateKey):
+                        raise ValueError(
+                            "Only RSA private keys support decryption")
 
                     # Read encrypted key length
                     key_len_bytes = f.read(4)
@@ -198,7 +205,8 @@ class SecurityEnhancer:
                 with open(output_path, "wb") as f:
                     f.write(data)
 
-                logger.debug(f"File decrypted: {encrypted_path} -> {output_path}")
+                logger.debug(
+                    f"File decrypted: {encrypted_path} -> {output_path}")
                 return output_path
         except Exception as e:
             logger.error(f"Failed to decrypt file {encrypted_path}: {str(e)}")
@@ -206,25 +214,12 @@ class SecurityEnhancer:
                 os.remove(output_path)
             raise
 
-    def verify_file_integrity(self, file_path: str, checksum: str) -> bool:
-        """Verify file integrity using checksum
-        
-        Args:
-            file_path: Path to file
-            checksum: Expected checksum
-            
-        Returns:
-            True if checksum matches, False otherwise
-        """
-        calculated_checksum = self.calculate_file_checksum(file_path)
-        return calculated_checksum == checksum
-
     def calculate_file_checksum(self, file_path: str) -> str:
         """Calculate file checksum
-        
+
         Args:
             file_path: Path to file
-            
+
         Returns:
             SHA-256 checksum as hex string
         """
@@ -234,31 +229,31 @@ class SecurityEnhancer:
                 sha256_hash.update(chunk)
         return sha256_hash.hexdigest()
 
-    def generate_token(self, user_data: dict, expiry: int = 3600) -> str:
+    def generate_token(self, user_data: dict[str, str], expiry: int = 3600) -> str:
         """Generate JWT token
-        
+
         Args:
             user_data: User data to include in token
             expiry: Token expiry time in seconds
-            
+
         Returns:
             JWT token string
         """
-        payload = {
+        payload: dict[str, str | float] = {
             **user_data,
             'exp': time.time() + expiry
         }
         return jwt.encode(payload, self.jwt_secret, algorithm='HS256')
 
-    def verify_token(self, token: str) -> dict:
+    def verify_token(self, token: str) -> dict[str, str]:
         """Verify JWT token
-        
+
         Args:
             token: JWT token to verify
-            
+
         Returns:
             Token payload if valid
-            
+
         Raises:
             SecurityError: If token is invalid or expired
         """
@@ -269,13 +264,13 @@ class SecurityEnhancer:
         except jwt.InvalidTokenError:
             raise SecurityError("Invalid token")
 
-    def derive_key(self, password: str, salt: bytes = None) -> bytes:
+    def derive_key(self, password: str, salt: Optional[bytes] = None) -> Tuple[bytes, bytes]:
         """Derive encryption key from password
-        
+
         Args:
             password: Password to derive key from
             salt: Optional salt, random if not provided
-            
+
         Returns:
             Tuple of (key, salt)
         """
@@ -292,7 +287,7 @@ class SecurityEnhancer:
 
     def secure_delete(self, file_path: str):
         """Securely delete file by overwriting with random data
-        
+
         Args:
             file_path: Path to file to delete
         """
@@ -304,10 +299,10 @@ class SecurityEnhancer:
 
     def encrypt_with_rsa(self, data: bytes) -> bytes:
         """Encrypt data using RSA
-        
+
         Args:
             data: Data to encrypt
-            
+
         Returns:
             Encrypted data
         """
@@ -331,14 +326,14 @@ class SecurityEnhancer:
 
     def encrypt_large_file(self, file_path: str) -> str:
         """Encrypt large file using AESGCM
-        
+
         Args:
             file_path: Path to file
-            
+
         Returns:
             Path to encrypted file
         """
-        aes_key = AESGCM.generate_key(bit_length=256)
+        aes_key = AESGCM.generate_key(key_size=256)
         aesgcm = AESGCM(aes_key)
         nonce = os.urandom(12)
 
@@ -360,10 +355,10 @@ class SecurityEnhancer:
 
     def generate_key_pair(self, key_name: str = "default") -> Tuple[str, str]:
         """Generate RSA key pair
-        
+
         Args:
             key_name: Key name
-            
+
         Returns:
             Tuple of (private_key_path, public_key_path)
         """
@@ -396,11 +391,11 @@ class SecurityEnhancer:
 
     def calculate_file_hash(self, file_path: str, algorithm: str = 'sha256') -> str:
         """Calculate file hash using specified algorithm
-        
+
         Args:
             file_path: Path to file
             algorithm: Hash algorithm to use
-            
+
         Returns:
             Checksum as hex string
         """
@@ -413,12 +408,12 @@ class SecurityEnhancer:
     def verify_file_integrity(self, file_path: str, expected_hash: str,
                               algorithm: str = 'sha256') -> bool:
         """Verify file integrity with hash comparison
-        
+
         Args:
             file_path: Path to file
             expected_hash: Expected hash value
             algorithm: Hash algorithm
-            
+
         Returns:
             True if integrity check passes
         """
@@ -431,11 +426,11 @@ class SecurityEnhancer:
 
     def generate_signature(self, file_path: str, private_key_path: str) -> str:
         """Generate file signature
-        
+
         Args:
             file_path: Path to file
             private_key_path: Path to private key
-            
+
         Returns:
             Base64 encoded signature
         """
@@ -450,6 +445,10 @@ class SecurityEnhancer:
                 backend=default_backend()
             )
 
+        # Ensure we have an RSA private key for signing
+        if not isinstance(private_key, rsa.RSAPrivateKey):
+            raise ValueError("Only RSA private keys support signing")
+
         signature = private_key.sign(
             file_hash,
             padding.PSS(
@@ -463,12 +462,12 @@ class SecurityEnhancer:
 
     def verify_signature(self, file_path: str, signature: str, public_key_path: str) -> bool:
         """Verify file signature
-        
+
         Args:
             file_path: Path to file
             signature: Base64 encoded signature
             public_key_path: Path to public key
-            
+
         Returns:
             True if signature is valid
         """
@@ -485,6 +484,11 @@ class SecurityEnhancer:
                     key_file.read(),
                     backend=default_backend()
                 )
+
+            # Ensure we have an RSA public key for verification
+            if not isinstance(public_key, rsa.RSAPublicKey):
+                raise ValueError(
+                    "Only RSA public keys support signature verification")
 
             public_key.verify(
                 signature_bytes,

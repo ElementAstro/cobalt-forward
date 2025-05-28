@@ -1,6 +1,10 @@
+from typing import Optional
+
+
 class MQTTError(Exception):
     """Base exception class for MQTT errors"""
-    def __init__(self, message: str = None, code: int = None):
+
+    def __init__(self, message: Optional[str] = None, code: Optional[int] = None):
         self.message = message or "MQTT operation failed"
         self.code = code
         super().__init__(self.message)
@@ -8,7 +12,8 @@ class MQTTError(Exception):
 
 class ConnectionError(MQTTError):
     """Connection related errors"""
-    def __init__(self, message: str = None, code: int = None):
+
+    def __init__(self, message: Optional[str] = None, code: Optional[int] = None):
         super().__init__(
             message or "Failed to establish MQTT connection",
             code
@@ -17,7 +22,8 @@ class ConnectionError(MQTTError):
 
 class SubscriptionError(MQTTError):
     """Subscription related errors"""
-    def __init__(self, message: str = None, code: int = None):
+
+    def __init__(self, message: Optional[str] = None, code: Optional[int] = None):
         super().__init__(
             message or "Failed to subscribe to MQTT topic",
             code
@@ -26,7 +32,8 @@ class SubscriptionError(MQTTError):
 
 class PublishError(MQTTError):
     """Publishing related errors"""
-    def __init__(self, message: str = None, code: int = None):
+
+    def __init__(self, message: Optional[str] = None, code: Optional[int] = None):
         super().__init__(
             message or "Failed to publish MQTT message",
             code
@@ -35,7 +42,8 @@ class PublishError(MQTTError):
 
 class ConfigurationError(MQTTError):
     """Configuration related errors"""
-    def __init__(self, message: str = None, code: int = None):
+
+    def __init__(self, message: Optional[str] = None, code: Optional[int] = None):
         super().__init__(
             message or "Invalid MQTT configuration",
             code
@@ -44,7 +52,8 @@ class ConfigurationError(MQTTError):
 
 class MessageValidationError(MQTTError):
     """Message validation errors"""
-    def __init__(self, message: str = None, code: int = None):
+
+    def __init__(self, message: Optional[str] = None, code: Optional[int] = None):
         super().__init__(
             message or "Invalid MQTT message format",
             code
@@ -53,7 +62,8 @@ class MessageValidationError(MQTTError):
 
 class CircuitBreakerOpenError(ConnectionError):
     """Circuit breaker is open"""
-    def __init__(self, message: str = None, reset_time: float = None):
+
+    def __init__(self, message: Optional[str] = None, reset_time: Optional[float] = None):
         super().__init__(
             message or "Circuit breaker is open, requests are rejected",
             None
@@ -63,7 +73,8 @@ class CircuitBreakerOpenError(ConnectionError):
 
 class TimeoutError(MQTTError):
     """Operation timeout errors"""
-    def __init__(self, message: str = None, operation: str = None):
+
+    def __init__(self, message: Optional[str] = None, operation: Optional[str] = None):
         super().__init__(
             message or f"MQTT operation timed out: {operation or 'unknown'}",
             None

@@ -1,7 +1,6 @@
 import asyncio
-from typing import Optional, Union, deque
+from typing import Optional, Union, Deque
 from collections import deque
-import time
 
 
 class PacketBuffer:
@@ -14,14 +13,14 @@ class PacketBuffer:
             max_size: Maximum buffer size (bytes, default 16 MB)
         """
         self._buffer = memoryview(bytearray(max_size))
-        self._read_pos = 0
-        self._write_pos = 0
+        self._read_pos: int = 0
+        self._write_pos: int = 0
         self._event = asyncio.Event()
         self._lock = asyncio.Lock()
         # Small buffer cache to avoid frequent allocations
-        self._small_buffer_cache = deque(maxlen=32)
+        self._small_buffer_cache: Deque[bytearray] = deque(maxlen=32)
         self._read_waiters = 0
-        self._stats = {
+        self._stats: dict[str, int] = {
             'compactions': 0,    # Number of compaction operations
             'appends': 0,        # Number of append operations
             'reads': 0,          # Number of read operations
@@ -79,7 +78,7 @@ class PacketBuffer:
             if self._read_waiters > 0:
                 self._event.set()
 
-    async def read(self, size: int, timeout: float = None) -> Optional[bytes]:
+    async def read(self, size: int, timeout: Optional[float] = None) -> Optional[bytes]:
         """Read data from the buffer using optimized zero-copy implementation
 
         Args:
@@ -138,7 +137,11 @@ class PacketBuffer:
                     )
 
                     # Cache small buffers for future use
-                    if available <= 4096 and len(self._small_buffer_cache) < self._small_buffer_cache.maxlen:
+                    if available <= 4096 and \
+                       self._small_buffer_cache.maxlen is not None and \
+                       len(self._small_buffer_cache) < self._small_buffer_cache.maxlen:
+                        # Check if the last cached buffer is smaller than the current one,
+                        # or if the cache is empty, to potentially cache a larger "small" buffer.
                         if not self._small_buffer_cache or len(self._small_buffer_cache[-1]) < available:
                             self._small_buffer_cache.append(
                                 bytearray(available))
@@ -153,7 +156,7 @@ class PacketBuffer:
         finally:
             self._read_waiters -= 1
 
-    def get_stats(self) -> dict:
+    def get_stats(self) -> dict[str, int]:
         """Get buffer statistics
 
         Returns:
