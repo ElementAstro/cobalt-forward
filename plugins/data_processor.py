@@ -2,15 +2,63 @@
 Data Processor Plugin - A plugin for processing data in different formats
 
 This is an example plugin for the Cobalt Forward system.
+
+NOTE: This plugin is temporarily disabled during the migration from app/ to cobalt_forward/
+The plugin system will be fully migrated in a future update.
 """
+
+# TODO: Complete plugin system migration and re-enable this plugin
 import logging
 import time
 import json
 import asyncio
 from typing import Dict, List, Any, Optional
-from app.plugin.base import Plugin
-from app.plugin.models import PluginMetadata, PluginState
-from app.plugin.permissions import PluginPermission, require_permission
+# Temporary compatibility - plugin system will be fully migrated later
+# For now, using a simple base class to avoid import errors
+from typing import Any, Dict, Optional
+from abc import ABC, abstractmethod
+
+class PluginMetadata:
+    def __init__(self, name: str, version: str, author: str, description: str):
+        self.name = name
+        self.version = version
+        self.author = author
+        self.description = description
+
+class PluginState:
+    LOADED = "loaded"
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+
+class PluginPermission:
+    READ = "read"
+    WRITE = "write"
+    EXECUTE = "execute"
+
+def require_permission(permission: str):
+    def decorator(func):
+        return func
+    return decorator
+
+class Plugin(ABC):
+    def __init__(self):
+        self.metadata: Optional[PluginMetadata] = None
+        self.state = PluginState.LOADED
+        self.enabled = False
+
+    def register_event_handler(self, event: str, handler):
+        pass
+
+    def add_lifecycle_hook(self, hook: str, handler):
+        pass
+
+    @abstractmethod
+    async def initialize(self) -> None:
+        pass
+
+    @abstractmethod
+    async def shutdown(self) -> None:
+        pass
 
 logger = logging.getLogger(__name__)
 

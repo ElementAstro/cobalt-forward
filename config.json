@@ -1,0 +1,73 @@
+{
+  "name": "Cobalt Forward",
+  "version": "0.1.0",
+  "debug": false,
+  "environment": "production",
+  "tcp": {
+    "host": "localhost",
+    "port": 8080,
+    "timeout": 30.0,
+    "retry_attempts": 3,
+    "keepalive": true,
+    "buffer_size": 8192
+  },
+  "websocket": {
+    "host": "0.0.0.0",
+    "port": 8000,
+    "path": "/ws",
+    "ssl_enabled": false,
+    "ssl_cert_path": null,
+    "ssl_key_path": null,
+    "max_connections": 1000,
+    "ping_interval": 30.0,
+    "ping_timeout": 10.0
+  },
+  "ssh": {
+    "enabled": false,
+    "host": "localhost",
+    "port": 22,
+    "username": null,
+    "password": null,
+    "private_key_path": null,
+    "timeout": 30.0
+  },
+  "ftp": {
+    "enabled": false,
+    "host": "localhost",
+    "port": 21,
+    "root_directory": "/tmp/ftp",
+    "max_connections": 50
+  },
+  "mqtt": {
+    "enabled": false,
+    "broker_host": "localhost",
+    "broker_port": 1883,
+    "topics": []
+  },
+  "logging": {
+    "level": "INFO",
+    "log_directory": "logs",
+    "console_enabled": true,
+    "file_enabled": true,
+    "max_file_size": "10MB",
+    "backup_count": 5
+  },
+  "plugins": {
+    "enabled": true,
+    "plugin_directory": "plugins",
+    "auto_load": true
+  },
+  "performance": {
+    "enabled": true,
+    "metrics_interval": 60.0
+  },
+  "security": {
+    "api_key_required": false,
+    "allowed_origins": ["*"],
+    "rate_limit_enabled": true,
+    "rate_limit_requests": 100,
+    "rate_limit_window": 60
+  },
+  "data_directory": "data",
+  "temp_directory": "temp"
+}

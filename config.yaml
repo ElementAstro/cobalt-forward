@@ -1,18 +1,82 @@
-tcp_host: "localhost"
-tcp_port: 8080
-websocket_host: "0.0.0.0"
-websocket_port: 8000
-log_level: "INFO"
-max_connections: 1000
-buffer_size: 8192
-enable_ssl: false
-ssl_cert: null
-ssl_key: null
-metrics_enabled: true
-hot_reload: true
-development_mode: false
-log_path: "logs"
-tcp_timeout: 30.0
-tcp_retry_attempts: 3
-enable_metrics: true
-enable_cache: true
+config_file_path: null
+data_directory: data
+debug: false
+environment: production
+ftp:
+  enabled: false
+  host: localhost
+  max_connections: 50
+  passive_ports_end: 65535
+  passive_ports_start: 60000
+  port: 21
+  root_directory: /tmp/ftp
+  timeout: 300.0
+logging:
+  backup_count: 5
+  console_enabled: true
+  file_enabled: true
+  format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+  level: INFO
+  log_directory: logs
+  max_file_size: 10MB
+mqtt:
+  broker_host: localhost
+  broker_port: 1883
+  client_id: null
+  enabled: false
+  keepalive: 60
+  password: null
+  qos: 1
+  topics: []
+  username: null
+name: Cobalt Forward
+performance:
+  alert_thresholds: {}
+  enabled: true
+  history_size: 1000
+  metrics_interval: 60.0
+plugins:
+  allowed_modules: []
+  auto_load: true
+  blocked_modules: []
+  enabled: true
+  max_execution_time: 30.0
+  plugin_directory: plugins
+  sandbox_enabled: true
+security:
+  allowed_origins:
+  - '*'
+  api_key_header: X-API-Key
+  api_key_required: false
+  rate_limit_enabled: true
+  rate_limit_requests: 100
+  rate_limit_window: 60
+ssh:
+  enabled: false
+  host: localhost
+  known_hosts_path: null
+  password: null
+  pool_size: 5
+  port: 22
+  private_key_path: null
+  timeout: 30.0
+  username: null
+tcp:
+  buffer_size: 8192
+  host: localhost
+  keepalive: true
+  port: 8080
+  retry_attempts: 3
+  timeout: 30.0
+temp_directory: temp
+version: 0.1.0
+websocket:
+  host: 0.0.0.0
+  max_connections: 100
+  path: /ws
+  ping_interval: 30.0
+  ping_timeout: 10.0
+  port: 8000
+  ssl_cert_path: null
+  ssl_enabled: false
+  ssl_key_path: null
