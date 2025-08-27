@@ -19,7 +19,7 @@ except ImportError:
     asyncssh = None
 
 from ....core.interfaces.ssh import (
-    ISSHForwarder, ISSHTunnel, ForwardType, TunnelStatus, 
+    ISSHForwarder, ISSHTunnel, ForwardType, TunnelStatus,
     ForwardConfig, TunnelInfo
 )
 from ....core.interfaces.lifecycle import IComponent
@@ -30,79 +30,81 @@ logger = logging.getLogger(__name__)
 
 class SSHTunnel(ISSHTunnel):
     """SSH tunnel implementation."""
-    
+
     def __init__(self, tunnel_info: TunnelInfo, event_bus: Optional[IEventBus] = None):
         self._info = tunnel_info
         self._event_bus = event_bus
         self._connection: Optional[Any] = None
-        self._listener_tasks: Dict[str, asyncio.Task] = {}
-    
+        self._listener_tasks: Dict[str, asyncio.Task[None]] = {}
+
     async def connect(self) -> bool:
         """Connect the SSH tunnel."""
         if asyncssh is None:
             logger.error("asyncssh is not installed")
             return False
-        
+
         try:
             self._info.status = TunnelStatus.CONNECTING
-            
+
             # Prepare connection options
+            metadata = self._info.metadata or {}
             connect_kwargs = {
                 'host': self._info.host,
                 'port': self._info.port,
                 'username': self._info.username,
-                'client_version': self._info.metadata.get('client_version', 'Cobalt_SSH_Forwarder_1.0'),
-                'compression_algs': ['zlib@openssh.com', 'zlib'] if self._info.metadata.get('use_compression', True) else None,
-                'keepalive_interval': self._info.metadata.get('keepalive_interval', 60),
+                'client_version': metadata.get('client_version', 'Cobalt_SSH_Forwarder_1.0'),
+                'compression_algs': ['zlib@openssh.com', 'zlib'] if metadata.get('use_compression', True) else None,
+                'keepalive_interval': metadata.get('keepalive_interval', 60),
             }
-            
+
             # Add authentication
-            if 'password' in self._info.metadata:
-                connect_kwargs['password'] = self._info.metadata['password']
-            
-            if 'key_file' in self._info.metadata:
-                connect_kwargs['client_keys'] = [self._info.metadata['key_file']]
-            elif 'client_keys' in self._info.metadata:
-                connect_kwargs['client_keys'] = self._info.metadata['client_keys']
-            
-            if 'key_passphrase' in self._info.metadata:
-                connect_kwargs['passphrase'] = self._info.metadata['key_passphrase']
-            
+            if 'password' in metadata:
+                connect_kwargs['password'] = metadata['password']
+
+            if 'key_file' in metadata:
+                connect_kwargs['client_keys'] = [metadata['key_file']]
+            elif 'client_keys' in metadata:
+                connect_kwargs['client_keys'] = metadata['client_keys']
+
+            if 'key_passphrase' in metadata:
+                connect_kwargs['passphrase'] = metadata['key_passphrase']
+
             # Establish connection
             self._connection = await asyncssh.connect(**connect_kwargs)
-            
+
             # Start port forwards
             for i, forward in enumerate(self._info.forwards):
                 await self._start_forward(i)
-            
+
             self._info.status = TunnelStatus.CONNECTED
             self._info.last_connected = time.time()
             self._info.connection_count += 1
-            
+
             if self._event_bus:
                 await self._event_bus.publish("ssh.tunnel.connected", {
                     "tunnel_id": self._info.tunnel_id,
                     "host": self._info.host,
                     "port": self._info.port
                 })
-            
+
             logger.info(f"SSH tunnel connected: {self._info.tunnel_id}")
             return True
-            
+
         except Exception as e:
             self._info.status = TunnelStatus.ERROR
             self._info.last_error = str(e)
             self._info.error_count += 1
-            
+
             if self._event_bus:
                 await self._event_bus.publish("ssh.tunnel.error", {
                     "tunnel_id": self._info.tunnel_id,
                     "error": str(e)
                 })
-            
-            logger.error(f"Failed to connect SSH tunnel {self._info.tunnel_id}: {e}")
+
+            logger.error(
+                f"Failed to connect SSH tunnel {self._info.tunnel_id}: {e}")
             return False
-    
+
     async def disconnect(self) -> None:
         """Disconnect the SSH tunnel."""
         try:
@@ -114,43 +116,44 @@ class SSHTunnel(ISSHTunnel):
                         await task
                     except asyncio.CancelledError:
                         pass
-            
+
             self._listener_tasks.clear()
-            
+
             # Close connection
             if self._connection:
                 self._connection.close()
                 await self._connection.wait_closed()
                 self._connection = None
-            
+
             self._info.status = TunnelStatus.DISCONNECTED
             self._info.last_disconnected = time.time()
-            
+
             if self._event_bus:
                 await self._event_bus.publish("ssh.tunnel.disconnected", {
                     "tunnel_id": self._info.tunnel_id
                 })
-            
+
             logger.info(f"SSH tunnel disconnected: {self._info.tunnel_id}")
-            
+
         except Exception as e:
-            logger.error(f"Error disconnecting SSH tunnel {self._info.tunnel_id}: {e}")
-    
+            logger.error(
+                f"Error disconnecting SSH tunnel {self._info.tunnel_id}: {e}")
+
     async def add_forward(self, forward: ForwardConfig) -> int:
         """Add a port forward to the tunnel."""
         self._info.forwards.append(forward)
         forward_index = len(self._info.forwards) - 1
-        
+
         if self._info.status == TunnelStatus.CONNECTED:
             await self._start_forward(forward_index)
-        
+
         return forward_index
-    
+
     async def remove_forward(self, forward_index: int) -> bool:
         """Remove a port forward from the tunnel."""
         if forward_index < 0 or forward_index >= len(self._info.forwards):
             return False
-        
+
         # Stop the listener task
         task_id = f"forward_{forward_index}"
         if task_id in self._listener_tasks:
@@ -162,26 +165,26 @@ class SSHTunnel(ISSHTunnel):
                 except asyncio.CancelledError:
                     pass
             del self._listener_tasks[task_id]
-        
+
         # Remove the forward config
         del self._info.forwards[forward_index]
         return True
-    
+
     def get_info(self) -> TunnelInfo:
         """Get tunnel information."""
         return self._info
-    
+
     def is_connected(self) -> bool:
         """Check if tunnel is connected."""
         return self._info.status == TunnelStatus.CONNECTED and self._connection is not None
-    
+
     async def _start_forward(self, forward_index: int) -> None:
         """Start a port forward."""
         if not self._connection or forward_index >= len(self._info.forwards):
             return
-        
+
         forward = self._info.forwards[forward_index]
-        
+
         try:
             if forward.forward_type == ForwardType.LOCAL:
                 # Local port forwarding
@@ -191,9 +194,10 @@ class SSHTunnel(ISSHTunnel):
                     forward.dest_host,
                     forward.dest_port
                 )
-                
-                logger.info(f"Started local port forward: {forward.listen_host}:{forward.listen_port} -> {forward.dest_host}:{forward.dest_port}")
-                
+
+                logger.info(
+                    f"Started local port forward: {forward.listen_host}:{forward.listen_port} -> {forward.dest_host}:{forward.dest_port}")
+
             elif forward.forward_type == ForwardType.REMOTE:
                 # Remote port forwarding
                 listener = await self._connection.forward_remote_port(
@@ -202,28 +206,31 @@ class SSHTunnel(ISSHTunnel):
                     forward.dest_host,
                     forward.dest_port
                 )
-                
-                logger.info(f"Started remote port forward: {forward.listen_host}:{forward.listen_port} -> {forward.dest_host}:{forward.dest_port}")
-            
+
+                logger.info(
+                    f"Started remote port forward: {forward.listen_host}:{forward.listen_port} -> {forward.dest_host}:{forward.dest_port}")
+
             elif forward.forward_type == ForwardType.DYNAMIC:
                 # Dynamic port forwarding (SOCKS proxy)
                 listener = await self._connection.forward_socks(
                     forward.listen_host,
                     forward.listen_port
                 )
-                
-                logger.info(f"Started SOCKS proxy: {forward.listen_host}:{forward.listen_port}")
-            
+
+                logger.info(
+                    f"Started SOCKS proxy: {forward.listen_host}:{forward.listen_port}")
+
             else:
-                logger.warning(f"Unsupported forward type: {forward.forward_type}")
+                logger.warning(
+                    f"Unsupported forward type: {forward.forward_type}")
                 return
-            
+
             # Create task to maintain the listener
             task_id = f"forward_{forward_index}"
             self._listener_tasks[task_id] = asyncio.create_task(
                 self._maintain_listener(task_id, listener)
             )
-            
+
             if self._event_bus:
                 await self._event_bus.publish("ssh.forward.created", {
                     "tunnel_id": self._info.tunnel_id,
@@ -231,7 +238,7 @@ class SSHTunnel(ISSHTunnel):
                     "listen": f"{forward.listen_host}:{forward.listen_port}",
                     "destination": f"{forward.dest_host}:{forward.dest_port}" if forward.dest_host else "dynamic"
                 })
-        
+
         except Exception as e:
             logger.error(f"Failed to start forward {forward_index}: {e}")
             if self._event_bus:
@@ -240,7 +247,7 @@ class SSHTunnel(ISSHTunnel):
                     "forward_index": forward_index,
                     "error": str(e)
                 })
-    
+
     async def _maintain_listener(self, task_id: str, listener: Any) -> None:
         """Maintain a port forward listener."""
         try:
@@ -325,7 +332,8 @@ class SSHForwarder(ISSHForwarder, IComponent):
 
     async def health_check(self) -> Dict[str, Any]:
         """Perform health check."""
-        connected_count = sum(1 for tunnel in self._tunnels.values() if tunnel.is_connected())
+        connected_count = sum(
+            1 for tunnel in self._tunnels.values() if tunnel.is_connected())
         total_count = len(self._tunnels)
 
         return {
@@ -392,7 +400,8 @@ class SSHForwarder(ISSHForwarder, IComponent):
         tunnel = SSHTunnel(tunnel_info, self._event_bus)
         self._tunnels[tunnel_id] = tunnel
 
-        logger.info(f"Created SSH tunnel: {tunnel_id} ({username}@{host}:{port})")
+        logger.info(
+            f"Created SSH tunnel: {tunnel_id} ({username}@{host}:{port})")
 
         if self._event_bus:
             await self._event_bus.publish("ssh.tunnel.created", {
@@ -522,7 +531,8 @@ class SSHForwarder(ISSHForwarder, IComponent):
                     nonlocal bytes_transferred
                     bytes_transferred = bytes_sent
                     if callback:
-                        callback(local_path, remote_path, bytes_sent / total_bytes * 100)
+                        callback(local_path, remote_path,
+                                 bytes_sent / total_bytes * 100)
 
                 # Upload file
                 await sftp.put(
@@ -531,7 +541,8 @@ class SSHForwarder(ISSHForwarder, IComponent):
                     progress_handler=progress_callback if callback else None
                 )
 
-                logger.info(f"File uploaded: {local_path} -> {remote_path} ({file_size} bytes)")
+                logger.info(
+                    f"File uploaded: {local_path} -> {remote_path} ({file_size} bytes)")
 
                 if self._event_bus:
                     await self._event_bus.publish("ssh.file.uploaded", {
@@ -597,7 +608,8 @@ class SSHForwarder(ISSHForwarder, IComponent):
                     nonlocal bytes_transferred
                     bytes_transferred = bytes_received
                     if callback:
-                        callback(remote_path, local_path, bytes_received / total_bytes * 100)
+                        callback(remote_path, local_path,
+                                 bytes_received / total_bytes * 100)
 
                 # Download file
                 await sftp.get(
@@ -606,7 +618,8 @@ class SSHForwarder(ISSHForwarder, IComponent):
                     progress_handler=progress_callback if callback else None
                 )
 
-                logger.info(f"File downloaded: {remote_path} -> {local_path} ({file_size} bytes)")
+                logger.info(
+                    f"File downloaded: {remote_path} -> {local_path} ({file_size} bytes)")
 
                 if self._event_bus:
                     await self._event_bus.publish("ssh.file.downloaded", {
@@ -673,7 +686,8 @@ class SSHForwarder(ISSHForwarder, IComponent):
 
             execution_time = time.time() - start_time
 
-            logger.info(f"Command executed on {tunnel_id}: {command} (exit code: {result.exit_status})")
+            logger.info(
+                f"Command executed on {tunnel_id}: {command} (exit code: {result.exit_status})")
 
             if self._event_bus:
                 await self._event_bus.publish("ssh.command.executed", {

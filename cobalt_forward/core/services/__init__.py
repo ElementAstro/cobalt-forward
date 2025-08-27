@@ -11,6 +11,6 @@ from .command_dispatcher import CommandDispatcher
 
 __all__ = [
     "EventBus",
-    "MessageBus", 
+    "MessageBus",
     "CommandDispatcher",
 ]

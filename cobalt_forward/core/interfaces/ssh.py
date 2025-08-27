@@ -55,41 +55,41 @@ class TunnelInfo:
     connection_count: int = 0
     error_count: int = 0
     last_error: Optional[str] = None
-    metadata: Dict[str, Any] = None
+    metadata: Optional[Dict[str, Any]] = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.metadata is None:
             self.metadata = {}
 
 
 class ISSHTunnel(ABC):
     """Interface for SSH tunnel management."""
-    
+
     @abstractmethod
     async def connect(self) -> bool:
         """Connect the SSH tunnel."""
         pass
-    
+
     @abstractmethod
     async def disconnect(self) -> None:
         """Disconnect the SSH tunnel."""
         pass
-    
+
     @abstractmethod
     async def add_forward(self, forward: ForwardConfig) -> int:
         """Add a port forward to the tunnel."""
         pass
-    
+
     @abstractmethod
     async def remove_forward(self, forward_index: int) -> bool:
         """Remove a port forward from the tunnel."""
         pass
-    
+
     @abstractmethod
     def get_info(self) -> TunnelInfo:
         """Get tunnel information."""
         pass
-    
+
     @abstractmethod
     def is_connected(self) -> bool:
         """Check if tunnel is connected."""
@@ -99,11 +99,11 @@ class ISSHTunnel(ABC):
 class ISSHForwarder(IStartable, IStoppable, IHealthCheckable):
     """
     Interface for SSH forwarding service.
-    
+
     Provides SSH tunnel management with support for local, remote,
     and dynamic port forwarding.
     """
-    
+
     @abstractmethod
     async def create_tunnel(
         self,
@@ -121,7 +121,7 @@ class ISSHForwarder(IStartable, IStoppable, IHealthCheckable):
     ) -> str:
         """
         Create a new SSH tunnel.
-        
+
         Args:
             host: SSH server hostname or IP
             port: SSH server port
@@ -134,47 +134,47 @@ class ISSHForwarder(IStartable, IStoppable, IHealthCheckable):
             client_keys: List of client key paths
             keepalive_interval: Keep-alive interval in seconds
             metadata: Additional metadata
-            
+
         Returns:
             Tunnel ID
         """
         pass
-    
+
     @abstractmethod
     async def connect_tunnel(self, tunnel_id: str) -> bool:
         """Connect an SSH tunnel."""
         pass
-    
+
     @abstractmethod
     async def disconnect_tunnel(self, tunnel_id: str) -> bool:
         """Disconnect an SSH tunnel."""
         pass
-    
+
     @abstractmethod
     async def remove_tunnel(self, tunnel_id: str) -> bool:
         """Remove an SSH tunnel."""
         pass
-    
+
     @abstractmethod
     async def add_forward(self, tunnel_id: str, forward: ForwardConfig) -> int:
         """Add a port forward to a tunnel."""
         pass
-    
+
     @abstractmethod
     async def remove_forward(self, tunnel_id: str, forward_index: int) -> bool:
         """Remove a port forward from a tunnel."""
         pass
-    
+
     @abstractmethod
     def get_tunnel_info(self, tunnel_id: str) -> Optional[TunnelInfo]:
         """Get information about a tunnel."""
         pass
-    
+
     @abstractmethod
     def list_tunnels(self) -> List[TunnelInfo]:
         """List all tunnels."""
         pass
-    
+
     @abstractmethod
     async def upload_file(
         self,
@@ -185,7 +185,7 @@ class ISSHForwarder(IStartable, IStoppable, IHealthCheckable):
     ) -> Dict[str, Any]:
         """Upload a file through an SSH tunnel."""
         pass
-    
+
     @abstractmethod
     async def download_file(
         self,
@@ -196,7 +196,7 @@ class ISSHForwarder(IStartable, IStoppable, IHealthCheckable):
     ) -> Dict[str, Any]:
         """Download a file through an SSH tunnel."""
         pass
-    
+
     @abstractmethod
     async def execute_command(
         self,

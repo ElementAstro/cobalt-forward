@@ -5,8 +5,9 @@ This directory contains client implementations for various protocols used by the
 ## Completed Implementations
 
 ### SSH Client (`ssh/`)
+
 - **Status**: ✅ Complete
-- **Features**: 
+- **Features**:
   - Connection pooling
   - Command execution
   - File transfer (upload/download)
@@ -18,6 +19,7 @@ This directory contains client implementations for various protocols used by the
 ## Planned Implementations
 
 ### FTP Client (`ftp/`)
+
 - **Status**: 🔄 Pending Migration
 - **Source**: `app/client/ftp/`
 - **Features to Migrate**:
@@ -28,6 +30,7 @@ This directory contains client implementations for various protocols used by the
   - Progress monitoring
 
 ### MQTT Client (`mqtt/`)
+
 - **Status**: 🔄 Pending Migration
 - **Source**: `app/client/mqtt/`
 - **Features to Migrate**:
@@ -38,6 +41,7 @@ This directory contains client implementations for various protocols used by the
   - Event-driven architecture
 
 ### TCP Client (`tcp/`)
+
 - **Status**: 🔄 Pending Migration
 - **Source**: `app/client/tcp/`
 - **Features to Migrate**:
@@ -47,6 +51,7 @@ This directory contains client implementations for various protocols used by the
   - Binary data support
 
 ### UDP Client (`udp/`)
+
 - **Status**: 🔄 Pending Migration
 - **Source**: `app/client/udp/`
 - **Features to Migrate**:
@@ -56,6 +61,7 @@ This directory contains client implementations for various protocols used by the
   - Connection-less communication
 
 ### WebSocket Client (`websocket/`)
+
 - **Status**: 🔄 Pending Migration
 - **Source**: `app/client/websocket/`
 - **Features to Migrate**:
@@ -68,7 +74,9 @@ This directory contains client implementations for various protocols used by the
 ## Implementation Guidelines
 
 ### Directory Structure
+
 Each client implementation should follow this structure:
+
 ```
 protocol_name/
 ├── __init__.py          # Package exports
@@ -78,7 +86,9 @@ protocol_name/
 ```
 
 ### Base Class Usage
+
 All clients should inherit from `BaseClient` which provides:
+
 - Common lifecycle management
 - Metrics collection
 - Event bus integration
@@ -87,12 +97,16 @@ All clients should inherit from `BaseClient` which provides:
 - Connection management
 
 ### Interface Implementation
+
 Each client must implement the appropriate interface from `core.interfaces.clients`:
+
 - `IBaseClient` (required for all)
 - Protocol-specific interfaces (e.g., `IFTPClient`, `IMQTTClient`)
 
 ### Configuration
+
 Each client should have a configuration class that extends `ClientConfig`:
+
 ```python
 @dataclass
 class ProtocolClientConfig(ClientConfig):
@@ -102,14 +116,18 @@ class ProtocolClientConfig(ClientConfig):
 ```
 
 ### Event Publishing
+
 Clients should publish events for important operations:
+
 - Connection/disconnection
 - Data transfer progress
 - Errors and warnings
 - Performance metrics
 
 ### Testing
+
 Each client should include comprehensive tests:
+
 - Unit tests for individual methods
 - Integration tests with DI container
 - Mock tests for external dependencies
@@ -118,7 +136,7 @@ Each client should include comprehensive tests:
 ## Migration Priority
 
 1. **High Priority**: SSH Client ✅ (Complete)
-2. **Medium Priority**: 
+2. **Medium Priority**:
    - FTP Client (file transfer capabilities)
    - WebSocket Client (real-time communication)
 3. **Low Priority**:

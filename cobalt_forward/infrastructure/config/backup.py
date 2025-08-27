@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class ConfigBackup:
     """
     Configuration backup management system.
-    
+
     Handles creating, verifying, and restoring configuration backups with metadata.
     """
 
@@ -109,14 +109,15 @@ class ConfigBackup:
             # Create temporary directory for backup preparation
             with tempfile.TemporaryDirectory() as temp_dir:
                 temp_path = Path(temp_dir)
-                
+
                 # Write configuration to temporary file
                 config_file = temp_path / "config.json"
                 with open(config_file, 'w', encoding='utf-8') as f:
                     json.dump(config_data, f, indent=2, ensure_ascii=False)
-                
+
                 # Calculate checksum
-                backup_metadata["config_checksum"] = self._calculate_checksum(config_file)
+                backup_metadata["config_checksum"] = self._calculate_checksum(
+                    config_file)
                 backup_metadata["original_size"] = config_file.stat().st_size
 
                 # Write metadata
@@ -132,7 +133,7 @@ class ConfigBackup:
                 backup_metadata["compressed_size"] = backup_path.stat().st_size
 
             logger.info(f"Created configuration backup: {backup_filename}")
-            
+
             return {
                 "backup_id": backup_id,
                 "backup_path": str(backup_path),
@@ -165,12 +166,13 @@ class ConfigBackup:
         backup_path = self.backup_dir / backup_filename
 
         if not backup_path.exists():
-            raise FileNotFoundError(f"Backup file not found: {backup_filename}")
+            raise FileNotFoundError(
+                f"Backup file not found: {backup_filename}")
 
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
                 temp_path = Path(temp_dir)
-                
+
                 # Extract backup
                 with zipfile.ZipFile(backup_path, 'r') as zipf:
                     zipf.extractall(temp_path)
@@ -192,10 +194,11 @@ class ConfigBackup:
                 if metadata.get("config_checksum"):
                     actual_checksum = self._calculate_checksum(config_file)
                     if actual_checksum != metadata["config_checksum"]:
-                        raise ValueError("Backup integrity check failed: checksum mismatch")
+                        raise ValueError(
+                            "Backup integrity check failed: checksum mismatch")
 
                 with open(config_file, 'r', encoding='utf-8') as f:
-                    config_data = json.load(f)
+                    config_data: Dict[str, Any] = json.load(f)
 
                 logger.info(f"Restored configuration from backup: {backup_id}")
                 return config_data
@@ -239,7 +242,7 @@ class ConfigBackup:
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
                 temp_path = Path(temp_dir)
-                
+
                 # Extract metadata only
                 with zipfile.ZipFile(backup_path, 'r') as zipf:
                     try:
@@ -256,12 +259,12 @@ class ConfigBackup:
 
                 metadata_file = temp_path / "backup_metadata.json"
                 with open(metadata_file, 'r', encoding='utf-8') as f:
-                    metadata = json.load(f)
+                    metadata: Dict[str, Any] = json.load(f)
 
                 # Add file system information
                 metadata["file_path"] = str(backup_path)
                 metadata["file_size"] = backup_path.stat().st_size
-                
+
                 return metadata
 
         except Exception as e:
@@ -314,7 +317,8 @@ class ConfigBackup:
                         deleted_count += 1
                         logger.info(f"Deleted old backup: {backup_path.name}")
                     except Exception as e:
-                        logger.error(f"Failed to delete old backup {backup_path.name}: {e}")
+                        logger.error(
+                            f"Failed to delete old backup {backup_path.name}: {e}")
 
             logger.info(f"Cleaned up {deleted_count} old backups")
             return deleted_count

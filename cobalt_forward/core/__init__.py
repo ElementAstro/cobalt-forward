@@ -15,7 +15,7 @@ from .domain.messages import Message, MessageType
 __all__ = [
     "IStartable",
     "IStoppable",
-    "IHealthCheckable", 
+    "IHealthCheckable",
     "IEventBus",
     "IMessageBus",
     "ICommandDispatcher",

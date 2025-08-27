@@ -10,7 +10,7 @@ from .startup import ApplicationStartup
 
 __all__ = [
     "Container",
-    "IContainer", 
+    "IContainer",
     "ServiceLifetime",
     "ApplicationStartup",
 ]

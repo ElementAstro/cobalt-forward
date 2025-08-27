@@ -21,7 +21,7 @@ from .application.container import Container, IContainer
 
 __all__ = [
     "IStartable",
-    "IStoppable", 
+    "IStoppable",
     "IHealthCheckable",
     "IEventBus",
     "IMessageBus",

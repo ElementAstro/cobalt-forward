@@ -12,7 +12,7 @@ from .messages import Message, MessageType, MessagePriority
 __all__ = [
     "Event",
     "EventPriority",
-    "Command", 
+    "Command",
     "CommandResult",
     "CommandStatus",
     "CommandType",

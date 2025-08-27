@@ -59,40 +59,40 @@ class UploadInfo:
     updated_at: float
     completed_at: Optional[float] = None
     user_id: Optional[str] = None
-    metadata: Dict[str, Any] = None
-    
+    metadata: Optional[Dict[str, Any]] = None
+
     # Progress tracking
     bytes_uploaded: int = 0
     chunks_total: int = 0
     chunks_completed: int = 0
     upload_speed: float = 0.0  # bytes per second
     estimated_time_remaining: Optional[float] = None
-    
+
     # Configuration
     chunk_size: int = 1024 * 1024  # 1MB default
     strategy: UploadStrategy = UploadStrategy.SEQUENTIAL
     max_retries: int = 3
-    
+
     # Error tracking
     error_count: int = 0
     last_error: Optional[str] = None
-    
-    def __post_init__(self):
+
+    def __post_init__(self) -> None:
         if self.metadata is None:
             self.metadata = {}
-    
+
     @property
     def progress_percentage(self) -> float:
         """Calculate upload progress percentage."""
         if self.file_size == 0:
             return 100.0
         return (self.bytes_uploaded / self.file_size) * 100.0
-    
+
     @property
     def is_complete(self) -> bool:
         """Check if upload is complete."""
         return self.status == UploadStatus.COMPLETED
-    
+
     @property
     def is_active(self) -> bool:
         """Check if upload is actively running."""
@@ -101,37 +101,37 @@ class UploadInfo:
 
 class IUploadSession(ABC):
     """Interface for individual upload session management."""
-    
+
     @abstractmethod
     async def start(self) -> bool:
         """Start the upload session."""
         pass
-    
+
     @abstractmethod
     async def pause(self) -> bool:
         """Pause the upload session."""
         pass
-    
+
     @abstractmethod
     async def resume(self) -> bool:
         """Resume the upload session."""
         pass
-    
+
     @abstractmethod
     async def cancel(self) -> bool:
         """Cancel the upload session."""
         pass
-    
+
     @abstractmethod
     async def upload_chunk(self, chunk_data: bytes, chunk_index: int) -> bool:
         """Upload a specific chunk."""
         pass
-    
+
     @abstractmethod
     def get_info(self) -> UploadInfo:
         """Get upload session information."""
         pass
-    
+
     @abstractmethod
     def get_progress(self) -> Dict[str, Any]:
         """Get detailed progress information."""
@@ -141,11 +141,11 @@ class IUploadSession(ABC):
 class IUploadManager(IStartable, IStoppable, IHealthCheckable):
     """
     Interface for upload management service.
-    
+
     Provides file upload management with support for chunked uploads,
     resume capabilities, and progress monitoring.
     """
-    
+
     @abstractmethod
     async def create_upload(
         self,
@@ -160,7 +160,7 @@ class IUploadManager(IStartable, IStoppable, IHealthCheckable):
     ) -> str:
         """
         Create a new upload session.
-        
+
         Args:
             filename: Name of the file to upload
             file_size: Size of the file in bytes
@@ -170,32 +170,32 @@ class IUploadManager(IStartable, IStoppable, IHealthCheckable):
             metadata: Additional metadata (optional)
             chunk_size: Size of each chunk in bytes (optional)
             strategy: Upload strategy to use
-            
+
         Returns:
             Upload session ID
         """
         pass
-    
+
     @abstractmethod
     async def start_upload(self, upload_id: str) -> bool:
         """Start an upload session."""
         pass
-    
+
     @abstractmethod
     async def pause_upload(self, upload_id: str) -> bool:
         """Pause an upload session."""
         pass
-    
+
     @abstractmethod
     async def resume_upload(self, upload_id: str) -> bool:
         """Resume a paused upload session."""
         pass
-    
+
     @abstractmethod
     async def cancel_upload(self, upload_id: str) -> bool:
         """Cancel an upload session."""
         pass
-    
+
     @abstractmethod
     async def upload_chunk(
         self,
@@ -206,7 +206,7 @@ class IUploadManager(IStartable, IStoppable, IHealthCheckable):
     ) -> bool:
         """Upload a file chunk."""
         pass
-    
+
     @abstractmethod
     async def upload_file_stream(
         self,
@@ -216,12 +216,12 @@ class IUploadManager(IStartable, IStoppable, IHealthCheckable):
     ) -> bool:
         """Upload a file from an async stream."""
         pass
-    
+
     @abstractmethod
     def get_upload_info(self, upload_id: str) -> Optional[UploadInfo]:
         """Get information about an upload session."""
         pass
-    
+
     @abstractmethod
     def list_uploads(
         self,
@@ -230,22 +230,22 @@ class IUploadManager(IStartable, IStoppable, IHealthCheckable):
     ) -> List[UploadInfo]:
         """List upload sessions with optional filtering."""
         pass
-    
+
     @abstractmethod
     async def cleanup_completed_uploads(self, older_than_hours: int = 24) -> int:
         """Clean up completed uploads older than specified hours."""
         pass
-    
+
     @abstractmethod
     async def cleanup_failed_uploads(self, older_than_hours: int = 1) -> int:
         """Clean up failed uploads older than specified hours."""
         pass
-    
+
     @abstractmethod
     def get_upload_statistics(self) -> Dict[str, Any]:
         """Get upload statistics and metrics."""
         pass
-    
+
     @abstractmethod
     async def verify_upload_integrity(self, upload_id: str) -> Dict[str, Any]:
         """Verify the integrity of an uploaded file."""

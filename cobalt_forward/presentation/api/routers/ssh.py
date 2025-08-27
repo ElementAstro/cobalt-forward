@@ -21,18 +21,24 @@ logger = logging.getLogger(__name__)
 class SSHConnectionRequest(BaseModel):
     """SSH connection request model."""
     host: str = Field(..., description="SSH server hostname or IP")
-    port: int = Field(default=22, ge=1, le=65535, description="SSH server port")
+    port: int = Field(default=22, ge=1, le=65535,
+                      description="SSH server port")
     username: str = Field(..., description="Username for authentication")
-    password: Optional[str] = Field(None, description="Password for authentication")
+    password: Optional[str] = Field(
+        None, description="Password for authentication")
     key_file: Optional[str] = Field(None, description="Private key file path")
-    key_passphrase: Optional[str] = Field(None, description="Private key passphrase")
-    auto_connect: bool = Field(default=True, description="Auto-connect after creation")
-    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Additional metadata")
+    key_passphrase: Optional[str] = Field(
+        None, description="Private key passphrase")
+    auto_connect: bool = Field(
+        default=True, description="Auto-connect after creation")
+    metadata: Optional[Dict[str, Any]] = Field(
+        default_factory=dict, description="Additional metadata")
 
 
 class SSHForwardRequest(BaseModel):
     """SSH port forward request model."""
-    forward_type: ForwardType = Field(..., description="Type of port forwarding")
+    forward_type: ForwardType = Field(...,
+                                      description="Type of port forwarding")
     listen_host: str = Field(default="127.0.0.1", description="Listen host")
     listen_port: int = Field(..., ge=1, le=65535, description="Listen port")
     dest_host: str = Field(..., description="Destination host")
@@ -43,7 +49,8 @@ class SSHForwardRequest(BaseModel):
 class SSHCommandRequest(BaseModel):
     """SSH command execution request model."""
     command: str = Field(..., description="Command to execute")
-    timeout: Optional[float] = Field(None, ge=1, le=3600, description="Command timeout in seconds")
+    timeout: Optional[float] = Field(
+        None, ge=1, le=3600, description="Command timeout in seconds")
 
 
 class SSHFileTransferRequest(BaseModel):
@@ -60,7 +67,8 @@ class SSHConnectionResponse(BaseModel):
     username: str = Field(..., description="Username")
     status: str = Field(..., description="Connection status")
     created_at: float = Field(..., description="Creation timestamp")
-    forwards: List[Dict[str, Any]] = Field(default_factory=list, description="Port forwards")
+    forwards: List[Dict[str, Any]] = Field(
+        default_factory=list, description="Port forwards")
 
 
 class SSHCommandResponse(BaseModel):
@@ -70,7 +78,8 @@ class SSHCommandResponse(BaseModel):
     exit_status: Optional[int] = Field(None, description="Command exit status")
     stdout: Optional[str] = Field(None, description="Command stdout")
     stderr: Optional[str] = Field(None, description="Command stderr")
-    execution_time: Optional[float] = Field(None, description="Execution time in seconds")
+    execution_time: Optional[float] = Field(
+        None, description="Execution time in seconds")
     error: Optional[str] = Field(None, description="Error message if failed")
 
 
@@ -78,16 +87,16 @@ class SSHCommandResponse(BaseModel):
 def get_container() -> IContainer:
     """Get the dependency injection container."""
     from fastapi import Request
-    
+
     def _get_container(request: Request) -> IContainer:
-        return request.app.state.container
-    
-    return Depends(_get_container)
+        return request.app.state.container  # type: ignore[no-any-return]
+
+    return Depends(_get_container)  # type: ignore[no-any-return]
 
 
 def get_ssh_forwarder(container: IContainer = get_container()) -> ISSHForwarder:
     """Get SSH forwarder service from container."""
-    return container.resolve(ISSHForwarder)
+    return container.resolve(ISSHForwarder)  # type: ignore[type-abstract]
 
 
 # Router definition
@@ -96,7 +105,8 @@ router = APIRouter(
     tags=["ssh"],
     responses={
         status.HTTP_404_NOT_FOUND: {"description": "Tunnel not found"},
-        status.HTTP_500_INTERNAL_SERVER_ERROR: {"description": "Internal server error"}
+        status.HTTP_500_INTERNAL_SERVER_ERROR: {
+            "description": "Internal server error"}
     }
 )
 
@@ -110,7 +120,7 @@ async def create_ssh_tunnel(
     try:
         # Convert forwards if provided
         forwards = []
-        if "forwards" in request.metadata:
+        if request.metadata and "forwards" in request.metadata:
             for forward_data in request.metadata["forwards"]:
                 forward = ForwardConfig(
                     forward_type=ForwardType(forward_data["forward_type"]),
@@ -121,7 +131,7 @@ async def create_ssh_tunnel(
                     description=forward_data.get("description")
                 )
                 forwards.append(forward)
-        
+
         # Create tunnel
         tunnel_id = await ssh_forwarder.create_tunnel(
             host=request.host,
@@ -134,7 +144,7 @@ async def create_ssh_tunnel(
             auto_connect=request.auto_connect,
             metadata=request.metadata
         )
-        
+
         # Get tunnel info
         tunnel_info = ssh_forwarder.get_tunnel_info(tunnel_id)
         if not tunnel_info:
@@ -142,7 +152,7 @@ async def create_ssh_tunnel(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to retrieve tunnel information"
             )
-        
+
         return SSHConnectionResponse(
             tunnel_id=tunnel_info.tunnel_id,
             host=tunnel_info.host,
@@ -162,7 +172,7 @@ async def create_ssh_tunnel(
                 for forward in tunnel_info.forwards
             ]
         )
-        
+
     except Exception as e:
         logger.error(f"Failed to create SSH tunnel: {e}")
         raise HTTPException(
@@ -178,7 +188,7 @@ async def list_ssh_tunnels(
     """List all SSH tunnels."""
     try:
         tunnels = ssh_forwarder.list_tunnels()
-        
+
         return [
             SSHConnectionResponse(
                 tunnel_id=tunnel.tunnel_id,
@@ -201,7 +211,7 @@ async def list_ssh_tunnels(
             )
             for tunnel in tunnels
         ]
-        
+
     except Exception as e:
         logger.error(f"Failed to list SSH tunnels: {e}")
         raise HTTPException(
@@ -223,7 +233,7 @@ async def get_ssh_tunnel(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"SSH tunnel not found: {tunnel_id}"
             )
-        
+
         return SSHConnectionResponse(
             tunnel_id=tunnel_info.tunnel_id,
             host=tunnel_info.host,
@@ -243,7 +253,7 @@ async def get_ssh_tunnel(
                 for forward in tunnel_info.forwards
             ]
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -395,7 +405,8 @@ async def remove_port_forward(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to remove port forward from tunnel {tunnel_id}: {e}")
+        logger.error(
+            f"Failed to remove port forward from tunnel {tunnel_id}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to remove port forward: {str(e)}"
@@ -423,6 +434,10 @@ async def execute_command(
         return SSHCommandResponse(
             success=False,
             command=request.command,
+            exit_status=None,
+            stdout=None,
+            stderr=None,
+            execution_time=None,
             error=str(e)
         )
 
@@ -468,7 +483,8 @@ async def download_file(
         return result
 
     except Exception as e:
-        logger.error(f"Failed to download file through tunnel {tunnel_id}: {e}")
+        logger.error(
+            f"Failed to download file through tunnel {tunnel_id}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to download file: {str(e)}"

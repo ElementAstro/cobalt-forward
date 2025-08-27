@@ -24,7 +24,7 @@ async def system_info(
 ) -> Dict[str, Any]:
     """
     Get system information.
-    
+
     Returns basic system and application information.
     """
     return {
@@ -52,16 +52,16 @@ async def get_configuration(
 ) -> Dict[str, Any]:
     """
     Get current configuration.
-    
+
     Returns the current application configuration (sensitive data masked).
     """
     try:
         config_manager = container.resolve(ConfigManager)
         config = config_manager.config
-        
+
         # Return configuration with sensitive data masked
         config_dict = config.to_dict()
-        
+
         # Mask sensitive fields
         if "ssh" in config_dict and "password" in config_dict["ssh"]:
             config_dict["ssh"]["password"] = "***"
@@ -69,9 +69,9 @@ async def get_configuration(
             config_dict["ftp"]["password"] = "***"
         if "mqtt" in config_dict and "password" in config_dict["mqtt"]:
             config_dict["mqtt"]["password"] = "***"
-        
+
         return config_dict
-    
+
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -86,18 +86,18 @@ async def reload_configuration(
 ) -> Dict[str, Any]:
     """
     Reload configuration from file.
-    
+
     Triggers a configuration reload if hot reload is enabled.
     """
     try:
         config_manager = container.resolve(ConfigManager)
         success = await config_manager.reload_config()
-        
+
         return {
             "success": success,
             "message": "Configuration reloaded successfully" if success else "Configuration reload failed"
         }
-    
+
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -111,11 +111,12 @@ async def list_services(
 ) -> Dict[str, Any]:
     """
     List all registered services.
-    
+
     Returns information about all services in the DI container.
     """
-    registrations = container.get_registrations()
-    
+    registrations: Dict[Any, Any] = getattr(container, 'get_registrations', lambda: {
+    })()  # type: ignore[misc,var-annotated]
+
     services = []
     for service_type, registration in registrations.items():
         services.append({
@@ -125,7 +126,7 @@ async def list_services(
             "has_instance": registration.instance is not None,
             "dependencies": [dep.__name__ for dep in registration.dependencies]
         })
-    
+
     return {
         "services": services,
         "total_count": len(services)
@@ -138,13 +139,14 @@ async def list_plugins(
 ) -> Dict[str, Any]:
     """
     List all loaded plugins.
-    
+
     Returns information about all loaded plugins.
     """
     try:
-        plugin_manager = container.resolve(IPluginManager)
+        plugin_manager = container.resolve(
+            IPluginManager)  # type: ignore[type-abstract]
         plugins = plugin_manager.get_all_plugins()
-        
+
         plugin_list = []
         for name, plugin in plugins.items():
             plugin_list.append({
@@ -153,12 +155,12 @@ async def list_plugins(
                 "dependencies": plugin.dependencies,
                 "permissions": list(plugin.permissions)
             })
-        
+
         return {
             "plugins": plugin_list,
             "total_count": len(plugin_list)
         }
-    
+
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -174,19 +176,20 @@ async def reload_plugin(
 ) -> Dict[str, Any]:
     """
     Reload a specific plugin.
-    
+
     Args:
         plugin_name: Name of the plugin to reload
     """
     try:
-        plugin_manager = container.resolve(IPluginManager)
+        plugin_manager = container.resolve(
+            IPluginManager)  # type: ignore[type-abstract]
         success = await plugin_manager.reload_plugin(plugin_name)
-        
+
         return {
             "success": success,
             "message": f"Plugin {plugin_name} reloaded successfully" if success else f"Failed to reload plugin {plugin_name}"
         }
-    
+
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -200,7 +203,7 @@ async def get_system_metrics(
 ) -> Dict[str, Any]:
     """
     Get system performance metrics.
-    
+
     Returns performance metrics from various components.
     """
     metrics = {
@@ -211,18 +214,18 @@ async def get_system_metrics(
             "cpu_usage": 0  # Placeholder
         },
         "application": {
-            "registered_services": len(container.get_registrations()),
+            "registered_services": len(getattr(container, 'get_registrations', lambda: {})()),
             "active_connections": 0,  # Placeholder
             "processed_messages": 0,  # Placeholder
             "processed_commands": 0  # Placeholder
         }
     }
-    
+
     # Try to get metrics from components
     try:
         # Add component-specific metrics here
         pass
     except Exception:
         pass  # Don't fail if metrics collection fails
-    
+
     return metrics

@@ -21,13 +21,13 @@ T = TypeVar('T')
 def get_container(request: Request) -> IContainer:
     """
     Get the dependency injection container from the request.
-    
+
     Args:
         request: FastAPI request object
-        
+
     Returns:
         Dependency injection container
-        
+
     Raises:
         HTTPException: If container is not available
     """
@@ -36,20 +36,20 @@ def get_container(request: Request) -> IContainer:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Application container not available"
         )
-    
-    return request.app.state.container
+
+    return request.app.state.container  # type: ignore[no-any-return]
 
 
 def get_config(request: Request) -> ApplicationConfig:
     """
     Get the application configuration from the request.
-    
+
     Args:
         request: FastAPI request object
-        
+
     Returns:
         Application configuration
-        
+
     Raises:
         HTTPException: If configuration is not available
     """
@@ -58,17 +58,17 @@ def get_config(request: Request) -> ApplicationConfig:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Application configuration not available"
         )
-    
-    return request.app.state.config
+
+    return request.app.state.config  # type: ignore[no-any-return]
 
 
 def get_component(service_type: Type[T]) -> Any:
     """
     Create a dependency function to get a specific component type.
-    
+
     Args:
         service_type: Type of service to resolve
-        
+
     Returns:
         Dependency function that resolves the service
     """
@@ -80,43 +80,45 @@ def get_component(service_type: Type[T]) -> Any:
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=f"Service {service_type.__name__} not available: {str(e)}"
             )
-    
+
     return _get_component
 
 
 # Pre-defined dependency functions for common services
-get_event_bus = get_component(IEventBus)
-get_message_bus = get_component(IMessageBus)
-get_command_dispatcher = get_component(ICommandDispatcher)
-get_plugin_manager = get_component(IPluginManager)
+get_event_bus = get_component(IEventBus)  # type: ignore[type-abstract]
+get_message_bus = get_component(IMessageBus)  # type: ignore[type-abstract]
+get_command_dispatcher = get_component(
+    ICommandDispatcher)  # type: ignore[type-abstract]
+get_plugin_manager = get_component(
+    IPluginManager)  # type: ignore[type-abstract]
 
 
 def require_api_key(request: Request, config: ApplicationConfig = Depends(get_config)) -> bool:
     """
     Dependency to require API key authentication.
-    
+
     Args:
         request: FastAPI request object
         config: Application configuration
-        
+
     Returns:
         True if authentication is successful
-        
+
     Raises:
         HTTPException: If authentication fails
     """
     if not config.security.api_key_required:
         return True
-    
+
     api_key = request.headers.get(config.security.api_key_header)
-    
+
     if not api_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="API key required",
             headers={"WWW-Authenticate": "ApiKey"}
         )
-    
+
     # In a real implementation, you would validate the API key
     # against a database or configuration
     # For now, we'll just check if it's not empty
@@ -126,17 +128,17 @@ def require_api_key(request: Request, config: ApplicationConfig = Depends(get_co
             detail="Invalid API key",
             headers={"WWW-Authenticate": "ApiKey"}
         )
-    
+
     return True
 
 
 def get_user_context(request: Request) -> Dict[str, Any]:
     """
     Get user context from request headers.
-    
+
     Args:
         request: FastAPI request object
-        
+
     Returns:
         User context dictionary
     """

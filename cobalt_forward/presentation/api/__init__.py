@@ -11,6 +11,6 @@ from .dependencies import get_container, get_config, get_component
 __all__ = [
     "create_app",
     "get_container",
-    "get_config", 
+    "get_config",
     "get_component",
 ]

@@ -7,7 +7,7 @@ proper middleware, error handling, and route registration.
 
 import logging
 from contextlib import asynccontextmanager
-from typing import Any, Dict
+from typing import Any, Dict, AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,19 +22,19 @@ logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     Application lifespan manager.
-    
+
     Handles startup and shutdown of application components.
     """
     logger.info("Application starting up...")
-    
+
     # Application startup is handled by the main startup process
     # The container and components are already initialized
-    
+
     yield
-    
+
     # Shutdown is handled by the main shutdown process
     logger.info("Application shutting down...")
 
@@ -42,11 +42,11 @@ async def lifespan(app: FastAPI):
 def create_app(container: Container, config: ApplicationConfig) -> FastAPI:
     """
     Create and configure the FastAPI application.
-    
+
     Args:
         container: Dependency injection container
         config: Application configuration
-        
+
     Returns:
         Configured FastAPI application
     """
@@ -58,54 +58,55 @@ def create_app(container: Container, config: ApplicationConfig) -> FastAPI:
         debug=config.debug,
         lifespan=lifespan
     )
-    
+
     # Store container and config in app state
     app.state.container = container
     app.state.config = config
-    
+
     # Configure middleware
     _configure_middleware(app, config)
-    
+
     # Register routes
     _register_routes(app)
-    
-    logger.info(f"FastAPI application created: {config.name} v{config.version}")
+
+    logger.info(
+        f"FastAPI application created: {config.name} v{config.version}")
     return app
 
 
 def create_app_from_config() -> FastAPI:
     """
     Create app from configuration (for uvicorn reload).
-    
+
     This is a simplified factory for development mode with auto-reload.
     """
     from ...infrastructure.config.loader import ConfigLoader
     from ...application.container import Container
     from ...application.startup import ApplicationStartup
-    
+
     # Load configuration
     config_loader = ConfigLoader()
     config = config_loader.load_config("config.yaml")
-    
+
     # Create container (simplified for reload)
     container = Container()
-    
+
     return create_app(container, config)
 
 
 def _configure_middleware(app: FastAPI, config: ApplicationConfig) -> None:
     """Configure application middleware."""
-    
+
     # Security middleware
     app.add_middleware(SecurityMiddleware, config=config.security)
-    
+
     # Performance monitoring middleware
     if config.performance.enabled:
         app.add_middleware(PerformanceMiddleware, config=config.performance)
-    
+
     # Error handling middleware
     app.add_middleware(ErrorHandlerMiddleware)
-    
+
     # CORS middleware
     app.add_middleware(
         CORSMiddleware,
@@ -114,34 +115,34 @@ def _configure_middleware(app: FastAPI, config: ApplicationConfig) -> None:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    
+
     # Trusted host middleware (for production)
     if config.environment == "production":
         app.add_middleware(
             TrustedHostMiddleware,
             allowed_hosts=["localhost", "127.0.0.1", config.websocket.host]
         )
-    
+
     logger.debug("Middleware configured")
 
 
 def _register_routes(app: FastAPI) -> None:
     """Register API routes."""
-    
+
     # Health check routes
     app.include_router(
         health.router,
         prefix="/health",
         tags=["health"]
     )
-    
+
     # System management routes
     app.include_router(
         system.router,
         prefix="/api/v1/system",
         tags=["system"]
     )
-    
+
     # WebSocket routes
     app.include_router(
         websocket.router,
@@ -178,10 +179,10 @@ def _register_routes(app: FastAPI) -> None:
         core.router,
         tags=["core"]
     )
-    
+
     # Root endpoint
     @app.get("/", tags=["root"])
-    async def root():
+    async def root() -> Dict[str, str]:
         """Root endpoint with basic application information."""
         return {
             "name": app.title,
@@ -190,5 +191,5 @@ def _register_routes(app: FastAPI) -> None:
             "docs_url": "/docs",
             "health_url": "/health"
         }
-    
+
     logger.debug("Routes registered")

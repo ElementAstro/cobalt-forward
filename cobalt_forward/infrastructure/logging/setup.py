@@ -5,6 +5,8 @@ This module provides centralized logging configuration using loguru
 with support for file rotation, structured logging, and multiple outputs.
 """
 
+from ..config.models import LoggingConfig
+from ...core.interfaces.lifecycle import IComponent
 import logging
 import sys
 from pathlib import Path
@@ -16,9 +18,6 @@ try:
     LOGURU_AVAILABLE = True
 except ImportError:
     LOGURU_AVAILABLE = False
-
-from ...core.interfaces.lifecycle import IComponent
-from ..config.models import LoggingConfig
 
 
 def setup_logging(config: LoggingConfig) -> None:
@@ -118,25 +117,25 @@ class LoggingManager(IComponent):
         self._config = LoggingConfig(**config)
         self._started = False
         self._logger = logging.getLogger(__name__)
-    
+
     @property
     def name(self) -> str:
         """Get component name."""
         return "LoggingManager"
-    
+
     @property
     def version(self) -> str:
         """Get component version."""
         return "1.0.0"
-    
+
     async def start(self) -> None:
         """Start the logging manager."""
         if self._started:
             return
-        
+
         setup_logging(self._config)
         self._started = True
-        
+
         self._logger.info("Logging manager started")
         self._logger.info(f"Log level: {self._config.level}")
         self._logger.info(f"Log directory: {self._config.log_directory}")
@@ -156,11 +155,11 @@ class LoggingManager(IComponent):
             # Reconfigure logging
             setup_logging(self._config)
             self._logger.info("Logging configuration updated")
-    
+
     async def check_health(self) -> Dict[str, Any]:
         """Check logging manager health."""
         log_dir = Path(self._config.log_directory)
-        
+
         return {
             'healthy': True,
             'status': 'running' if self._started else 'stopped',
@@ -174,7 +173,7 @@ class LoggingManager(IComponent):
                 'backup_count': self._config.backup_count
             }
         }
-    
+
     def get_logger(self, name: str) -> Any:
         """
         Get a logger instance for the given name.
@@ -246,7 +245,8 @@ class LoggingManager(IComponent):
             **kwargs: Additional structured data
         """
         if LOGURU_AVAILABLE:
-            log_func = getattr(loguru_logger, level.lower(), loguru_logger.info)
+            log_func = getattr(loguru_logger, level.lower(),
+                               loguru_logger.info)
             log_func(message, **kwargs)
         else:
             log_func = getattr(self._logger, level.lower(), self._logger.info)

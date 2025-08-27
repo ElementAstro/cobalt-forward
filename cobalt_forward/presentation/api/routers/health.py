@@ -25,7 +25,7 @@ async def health_check(
 ) -> Dict[str, Any]:
     """
     Basic health check endpoint.
-    
+
     Returns overall application health status.
     """
     return {
@@ -46,25 +46,26 @@ async def detailed_health_check(
 ) -> Dict[str, Any]:
     """
     Detailed health check with component status.
-    
+
     Returns health status for all registered components.
     """
     components_health = {}
     overall_healthy = True
-    
+
     # Check health of all registered components
-    registrations = container.get_registrations()
-    
+    registrations: Dict[Any, Any] = getattr(container, 'get_registrations', lambda: {
+    })()  # type: ignore[misc,var-annotated]
+
     for service_type, registration in registrations.items():
         component_name = service_type.__name__
-        
+
         try:
             component = container.resolve(service_type)
-            
+
             if isinstance(component, IComponent):
                 health_info = await component.check_health()
                 components_health[component_name] = health_info
-                
+
                 if not health_info.get("healthy", True):
                     overall_healthy = False
             else:
@@ -74,7 +75,7 @@ async def detailed_health_check(
                     "status": "available",
                     "details": {"type": "service"}
                 }
-        
+
         except Exception as e:
             components_health[component_name] = {
                 "healthy": False,
@@ -82,7 +83,7 @@ async def detailed_health_check(
                 "details": {"error": str(e)}
             }
             overall_healthy = False
-    
+
     return {
         "status": "healthy" if overall_healthy else "degraded",
         "timestamp": datetime.utcnow().isoformat(),
@@ -101,7 +102,7 @@ async def readiness_check(
 ) -> Dict[str, Any]:
     """
     Readiness check endpoint.
-    
+
     Indicates if the application is ready to serve requests.
     """
     # Check if essential services are available
@@ -109,18 +110,19 @@ async def readiness_check(
         "ConfigManager",
         "LoggingManager"
     ]
-    
+
     ready = True
     missing_services = []
-    
-    registrations = container.get_registrations()
+
+    registrations: Dict[Any, Any] = getattr(container, 'get_registrations', lambda: {
+    })()  # type: ignore[misc,var-annotated]
     available_services = [st.__name__ for st in registrations.keys()]
-    
+
     for service in essential_services:
         if service not in available_services:
             ready = False
             missing_services.append(service)
-    
+
     return {
         "ready": ready,
         "timestamp": datetime.utcnow().isoformat(),
@@ -132,7 +134,7 @@ async def readiness_check(
 async def liveness_check() -> Dict[str, Any]:
     """
     Liveness check endpoint.
-    
+
     Simple endpoint to indicate the application is running.
     """
     return {

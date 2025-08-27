@@ -123,13 +123,13 @@ class SecurityConfig:
 @dataclass
 class ApplicationConfig:
     """Main application configuration."""
-    
+
     # Basic application settings
     name: str = "Cobalt Forward"
     version: str = "0.1.0"
     debug: bool = False
     environment: str = "production"
-    
+
     # Component configurations
     tcp: TCPConfig = field(default_factory=TCPConfig)
     websocket: WebSocketConfig = field(default_factory=WebSocketConfig)
@@ -140,12 +140,12 @@ class ApplicationConfig:
     plugins: PluginConfig = field(default_factory=PluginConfig)
     performance: PerformanceConfig = field(default_factory=PerformanceConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
-    
+
     # Additional settings
     config_file_path: Optional[str] = None
     data_directory: str = "data"
     temp_directory: str = "temp"
-    
+
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
         self._validate_paths()
@@ -160,7 +160,7 @@ class ApplicationConfig:
             self.logging.log_directory,
             self.plugins.plugin_directory
         ]
-        
+
         for path_str in paths_to_check:
             if path_str:
                 path = Path(path_str)
@@ -168,7 +168,7 @@ class ApplicationConfig:
                     path.mkdir(parents=True, exist_ok=True)
                 except Exception as e:
                     raise ValueError(f"Cannot create directory {path}: {e}")
-    
+
     def _validate_ports(self) -> None:
         """Validate port numbers."""
         ports = [
@@ -178,11 +178,12 @@ class ApplicationConfig:
             ("FTP port", self.ftp.port),
             ("MQTT port", self.mqtt.broker_port),
         ]
-        
+
         for name, port in ports:
             if not (1 <= port <= 65535):
-                raise ValueError(f"{name} must be between 1 and 65535, got {port}")
-    
+                raise ValueError(
+                    f"{name} must be between 1 and 65535, got {port}")
+
     def _validate_timeouts(self) -> None:
         """Validate timeout values."""
         timeouts = [
@@ -191,24 +192,24 @@ class ApplicationConfig:
             ("FTP timeout", self.ftp.timeout),
             ("WebSocket ping timeout", self.websocket.ping_timeout),
         ]
-        
+
         for name, timeout in timeouts:
             if timeout <= 0:
                 raise ValueError(f"{name} must be positive, got {timeout}")
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary."""
         result = {}
-        
+
         for field_name, field_value in self.__dict__.items():
             if hasattr(field_value, '__dict__'):
                 # Convert dataclass to dict
                 result[field_name] = field_value.__dict__
             else:
                 result[field_name] = field_value
-        
+
         return result
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ApplicationConfig':
         """Create configuration from dictionary."""
@@ -222,7 +223,7 @@ class ApplicationConfig:
         plugin_config = PluginConfig(**data.get('plugins', {}))
         performance_config = PerformanceConfig(**data.get('performance', {}))
         security_config = SecurityConfig(**data.get('security', {}))
-        
+
         # Create main configuration
         return cls(
             name=data.get('name', 'Cobalt Forward'),

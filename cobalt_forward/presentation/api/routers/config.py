@@ -20,11 +20,12 @@ logger = logging.getLogger(__name__)
 class ConfigUpdateRequest(BaseModel):
     """Configuration update request model."""
     config: Dict[str, Any] = Field(..., description="Configuration data")
-    validate_only: bool = Field(default=False, description="Only validate, don't apply")
+    validate_only: bool = Field(
+        default=False, description="Only validate, don't apply")
 
     @field_validator('config')
     @classmethod
-    def validate_config(cls, v):
+    def validate_config(cls, v: Any) -> Dict[str, Any]:
         """Validate configuration structure."""
         if not isinstance(v, dict):
             raise ValueError("Configuration must be a dictionary")
@@ -40,7 +41,8 @@ class ConfigBackupRequest(BaseModel):
 class ConfigRestoreRequest(BaseModel):
     """Configuration restore request model."""
     backup_id: str = Field(..., description="Backup identifier")
-    force: bool = Field(default=False, description="Force restore without validation")
+    force: bool = Field(
+        default=False, description="Force restore without validation")
 
 
 class ConfigBackupInfo(BaseModel):
@@ -56,19 +58,21 @@ class ConfigBackupInfo(BaseModel):
 class ConfigValidationResult(BaseModel):
     """Configuration validation result model."""
     valid: bool = Field(..., description="Whether configuration is valid")
-    errors: List[str] = Field(default_factory=list, description="Validation errors")
-    warnings: List[str] = Field(default_factory=list, description="Validation warnings")
+    errors: List[str] = Field(default_factory=list,
+                              description="Validation errors")
+    warnings: List[str] = Field(
+        default_factory=list, description="Validation warnings")
 
 
 # Dependency injection
 def get_container() -> IContainer:
     """Get the dependency injection container."""
     from fastapi import Request
-    
+
     def _get_container(request: Request) -> IContainer:
-        return request.app.state.container
-    
-    return Depends(_get_container)
+        return request.app.state.container  # type: ignore[no-any-return]
+
+    return Depends(_get_container)  # type: ignore[no-any-return]
 
 
 def get_config_manager(container: IContainer = get_container()) -> ConfigManager:
@@ -82,7 +86,8 @@ router = APIRouter(
     tags=["configuration"],
     responses={
         status.HTTP_404_NOT_FOUND: {"description": "Configuration not found"},
-        status.HTTP_500_INTERNAL_SERVER_ERROR: {"description": "Internal server error"}
+        status.HTTP_500_INTERNAL_SERVER_ERROR: {
+            "description": "Internal server error"}
     }
 )
 
@@ -93,7 +98,7 @@ async def get_configuration(
 ) -> Dict[str, Any]:
     """Get current configuration."""
     try:
-        config = config_manager.get_config()
+        config = config_manager.config
         return {
             "success": True,
             "config": config,
@@ -123,16 +128,16 @@ async def update_configuration(
                 "validation": validation_result.dict(),
                 "message": "Configuration validation completed"
             }
-        
+
         # Update configuration
         await config_manager.update_config(request.config)
-        
+
         return {
             "success": True,
             "message": "Configuration updated successfully",
             "version": getattr(config_manager, 'version', '1.0.0')
         }
-        
+
     except Exception as e:
         logger.error(f"Failed to update configuration: {e}")
         raise HTTPException(
@@ -170,12 +175,12 @@ async def create_configuration_backup(
                 status_code=status.HTTP_501_NOT_IMPLEMENTED,
                 detail="Configuration backup not supported"
             )
-        
+
         backup_info = await config_manager.create_backup(
             description=request.description,
             encrypt=request.encrypt
         )
-        
+
         return ConfigBackupInfo(
             backup_id=backup_info['backup_id'],
             created_at=backup_info['created_at'],
@@ -184,7 +189,7 @@ async def create_configuration_backup(
             encrypted=backup_info['encrypted'],
             version=backup_info['version']
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -203,9 +208,9 @@ async def list_configuration_backups(
     try:
         if not hasattr(config_manager, 'list_backups'):
             return []
-        
+
         backups = await config_manager.list_backups()
-        
+
         return [
             ConfigBackupInfo(
                 backup_id=backup['backup_id'],
@@ -217,7 +222,7 @@ async def list_configuration_backups(
             )
             for backup in backups
         ]
-        
+
     except Exception as e:
         logger.error(f"Failed to list configuration backups: {e}")
         raise HTTPException(
@@ -238,17 +243,17 @@ async def restore_configuration(
                 status_code=status.HTTP_501_NOT_IMPLEMENTED,
                 detail="Configuration restore not supported"
             )
-        
+
         await config_manager.restore_backup(
             backup_id=request.backup_id,
             force=request.force
         )
-        
+
         return {
             "success": True,
             "message": f"Configuration restored from backup {request.backup_id}"
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -271,14 +276,14 @@ async def delete_configuration_backup(
                 status_code=status.HTTP_501_NOT_IMPLEMENTED,
                 detail="Configuration backup deletion not supported"
             )
-        
+
         await config_manager.delete_backup(backup_id)
-        
+
         return {
             "success": True,
             "message": f"Configuration backup {backup_id} deleted"
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -291,30 +296,30 @@ async def delete_configuration_backup(
 
 async def _validate_configuration(config: Dict[str, Any], config_manager: ConfigManager) -> ConfigValidationResult:
     """Validate configuration data."""
-    errors = []
-    warnings = []
-    
+    errors: List[str] = []
+    warnings: List[str] = []
+
     try:
         # Basic structure validation
         if not isinstance(config, dict):
             errors.append("Configuration must be a dictionary")
             return ConfigValidationResult(valid=False, errors=errors)
-        
+
         # Check for required fields (basic validation)
         required_fields = ['name', 'version']
         for field in required_fields:
             if field not in config:
                 warnings.append(f"Recommended field '{field}' is missing")
-        
+
         # Additional validation can be added here
         # For example, validate specific configuration sections
-        
+
         return ConfigValidationResult(
             valid=len(errors) == 0,
             errors=errors,
             warnings=warnings
         )
-        
+
     except Exception as e:
         errors.append(f"Validation error: {str(e)}")
         return ConfigValidationResult(valid=False, errors=errors)

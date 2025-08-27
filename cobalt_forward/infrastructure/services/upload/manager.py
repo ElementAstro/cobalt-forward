@@ -18,8 +18,10 @@ from typing import Dict, List, Optional, Set, Callable, Any, AsyncGenerator
 try:
     import aiofiles
     import aiofiles.os
+    AIOFILES_AVAILABLE = True
 except ImportError:
-    aiofiles = None
+    aiofiles = None  # type: ignore
+    AIOFILES_AVAILABLE = False
 
 from ....core.interfaces.upload import (
     IUploadManager, IUploadSession, UploadStatus, UploadStrategy,
@@ -33,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 class UploadSession(IUploadSession):
     """Upload session implementation."""
-    
+
     def __init__(
         self,
         upload_info: UploadInfo,
@@ -48,146 +50,148 @@ class UploadSession(IUploadSession):
         self._chunks: List[UploadChunk] = []
         self._active_chunks: Set[int] = set()
         self._lock = asyncio.Lock()
-    
+
     async def start(self) -> bool:
         """Start the upload session."""
         async with self._lock:
             if self._info.status != UploadStatus.PENDING:
-                logger.warning(f"Upload {self._info.upload_id} is not in pending state")
+                logger.warning(
+                    f"Upload {self._info.upload_id} is not in pending state")
                 return False
-            
+
             self._info.status = UploadStatus.UPLOADING
             self._info.updated_at = time.time()
-            
+
             # Prepare chunks
             await self._prepare_chunks()
-            
+
             if self._event_bus:
                 await self._event_bus.publish("upload.started", {
                     "upload_id": self._info.upload_id,
                     "filename": self._info.filename,
                     "file_size": self._info.file_size
                 })
-            
+
             logger.info(f"Started upload session: {self._info.upload_id}")
             return True
-    
+
     async def pause(self) -> bool:
         """Pause the upload session."""
         async with self._lock:
             if self._info.status != UploadStatus.UPLOADING:
                 return False
-            
+
             self._info.status = UploadStatus.PAUSED
             self._info.updated_at = time.time()
-            
+
             if self._event_bus:
                 await self._event_bus.publish("upload.paused", {
                     "upload_id": self._info.upload_id
                 })
-            
+
             logger.info(f"Paused upload session: {self._info.upload_id}")
             return True
-    
+
     async def resume(self) -> bool:
         """Resume the upload session."""
         async with self._lock:
             if self._info.status != UploadStatus.PAUSED:
                 return False
-            
+
             self._info.status = UploadStatus.UPLOADING
             self._info.updated_at = time.time()
-            
+
             if self._event_bus:
                 await self._event_bus.publish("upload.resumed", {
                     "upload_id": self._info.upload_id
                 })
-            
+
             logger.info(f"Resumed upload session: {self._info.upload_id}")
             return True
-    
+
     async def cancel(self) -> bool:
         """Cancel the upload session."""
         async with self._lock:
             if self._info.status in (UploadStatus.COMPLETED, UploadStatus.CANCELLED):
                 return False
-            
+
             self._info.status = UploadStatus.CANCELLED
             self._info.updated_at = time.time()
-            
+
             # Clean up temporary files
             await self._cleanup_temp_files()
-            
+
             if self._event_bus:
                 await self._event_bus.publish("upload.cancelled", {
                     "upload_id": self._info.upload_id
                 })
-            
+
             logger.info(f"Cancelled upload session: {self._info.upload_id}")
             return True
-    
+
     async def upload_chunk(self, chunk_data: bytes, chunk_index: int) -> bool:
         """Upload a specific chunk."""
         if chunk_index >= len(self._chunks):
             logger.error(f"Invalid chunk index: {chunk_index}")
             return False
-        
+
         chunk = self._chunks[chunk_index]
-        
+
         try:
             # Write chunk to temporary file
-            temp_path = os.path.join(self._temp_dir, f"{self._info.upload_id}_chunk_{chunk_index}")
-            
+            temp_path = os.path.join(
+                self._temp_dir, f"{self._info.upload_id}_chunk_{chunk_index}")
+
             if aiofiles:
                 async with aiofiles.open(temp_path, 'wb') as f:
                     await f.write(chunk_data)
             else:
                 with open(temp_path, 'wb') as f:
                     f.write(chunk_data)
-            
+
             # Update chunk info
             chunk.uploaded = True
             chunk.upload_time = time.time()
             chunk.checksum = hashlib.sha256(chunk_data).hexdigest()
-            
+
             # Update upload progress
             self._info.bytes_uploaded += len(chunk_data)
             self._info.chunks_completed += 1
             self._info.updated_at = time.time()
-            
+
             # Check if upload is complete
             if self._info.chunks_completed >= self._info.chunks_total:
                 await self._finalize_upload()
-            
+
             if self._event_bus:
                 await self._event_bus.publish("upload.chunk_completed", {
                     "upload_id": self._info.upload_id,
                     "chunk_index": chunk_index,
                     "progress": self._info.progress_percentage
                 })
-            
+
             return True
-            
+
         except Exception as e:
             chunk.retry_count += 1
             self._info.error_count += 1
             self._info.last_error = str(e)
-            
+
             logger.error(f"Failed to upload chunk {chunk_index}: {e}")
-            
+
             if self._event_bus:
                 await self._event_bus.publish("upload.chunk_error", {
                     "upload_id": self._info.upload_id,
                     "chunk_index": chunk_index,
                     "error": str(e)
                 })
-            
+
             return False
-    
+
     def get_info(self) -> UploadInfo:
         """Get upload session information."""
         return self._info
-    
+
     def get_progress(self) -> Dict[str, Any]:
         """Get detailed progress information."""
         return {
@@ -203,19 +207,19 @@ class UploadSession(IUploadSession):
             "created_at": self._info.created_at,
             "updated_at": self._info.updated_at
         }
-    
+
     async def _prepare_chunks(self) -> None:
         """Prepare upload chunks."""
         chunk_size = self._info.chunk_size
         file_size = self._info.file_size
-        
+
         chunks_total = (file_size + chunk_size - 1) // chunk_size
         self._info.chunks_total = chunks_total
-        
+
         for i in range(chunks_total):
             start_offset = i * chunk_size
             end_offset = min(start_offset + chunk_size, file_size)
-            
+
             chunk = UploadChunk(
                 chunk_id=f"{self._info.upload_id}_chunk_{i}",
                 upload_id=self._info.upload_id,
@@ -224,19 +228,20 @@ class UploadSession(IUploadSession):
                 end_offset=end_offset,
                 size=end_offset - start_offset
             )
-            
+
             self._chunks.append(chunk)
-    
+
     async def _finalize_upload(self) -> None:
         """Finalize the upload by combining chunks."""
         try:
             # Combine all chunks into final file
             final_path = os.path.join(self._upload_dir, self._info.filename)
-            
+
             if aiofiles:
                 async with aiofiles.open(final_path, 'wb') as final_file:
                     for i in range(len(self._chunks)):
-                        chunk_path = os.path.join(self._temp_dir, f"{self._info.upload_id}_chunk_{i}")
+                        chunk_path = os.path.join(
+                            self._temp_dir, f"{self._info.upload_id}_chunk_{i}")
                         if os.path.exists(chunk_path):
                             async with aiofiles.open(chunk_path, 'rb') as chunk_file:
                                 chunk_data = await chunk_file.read()
@@ -244,49 +249,52 @@ class UploadSession(IUploadSession):
             else:
                 with open(final_path, 'wb') as final_file:
                     for i in range(len(self._chunks)):
-                        chunk_path = os.path.join(self._temp_dir, f"{self._info.upload_id}_chunk_{i}")
+                        chunk_path = os.path.join(
+                            self._temp_dir, f"{self._info.upload_id}_chunk_{i}")
                         if os.path.exists(chunk_path):
                             with open(chunk_path, 'rb') as chunk_file:
                                 chunk_data = chunk_file.read()
                                 final_file.write(chunk_data)
-            
+
             # Update status
             self._info.status = UploadStatus.COMPLETED
             self._info.completed_at = time.time()
             self._info.updated_at = time.time()
-            
+
             # Clean up temporary files
             await self._cleanup_temp_files()
-            
+
             if self._event_bus:
                 await self._event_bus.publish("upload.completed", {
                     "upload_id": self._info.upload_id,
                     "filename": self._info.filename,
                     "final_path": final_path
                 })
-            
+
             logger.info(f"Upload completed: {self._info.upload_id}")
-            
+
         except Exception as e:
             self._info.status = UploadStatus.FAILED
             self._info.last_error = str(e)
             self._info.error_count += 1
-            
-            logger.error(f"Failed to finalize upload {self._info.upload_id}: {e}")
-            
+
+            logger.error(
+                f"Failed to finalize upload {self._info.upload_id}: {e}")
+
             if self._event_bus:
                 await self._event_bus.publish("upload.failed", {
                     "upload_id": self._info.upload_id,
                     "error": str(e)
                 })
-    
+
     async def _cleanup_temp_files(self) -> None:
         """Clean up temporary chunk files."""
         for i in range(len(self._chunks)):
-            chunk_path = os.path.join(self._temp_dir, f"{self._info.upload_id}_chunk_{i}")
+            chunk_path = os.path.join(
+                self._temp_dir, f"{self._info.upload_id}_chunk_{i}")
             try:
                 if os.path.exists(chunk_path):
-                    if aiofiles:
+                    if AIOFILES_AVAILABLE:
                         await aiofiles.os.remove(chunk_path)
                     else:
                         os.remove(chunk_path)
@@ -321,8 +329,10 @@ class UploadManager(IUploadManager, IComponent):
             max_concurrent_uploads: Maximum concurrent uploads
         """
         self._event_bus = event_bus
-        self._upload_dir = upload_dir or os.path.join(tempfile.gettempdir(), "uploads")
-        self._temp_dir = temp_dir or os.path.join(tempfile.gettempdir(), "temp_uploads")
+        self._upload_dir = upload_dir or os.path.join(
+            tempfile.gettempdir(), "uploads")
+        self._temp_dir = temp_dir or os.path.join(
+            tempfile.gettempdir(), "temp_uploads")
         self._chunk_size = chunk_size
         self._max_concurrent_uploads = max_concurrent_uploads
 
@@ -617,7 +627,7 @@ class UploadManager(IUploadManager, IComponent):
 
             if (upload_info.status == UploadStatus.COMPLETED and
                 upload_info.completed_at and
-                upload_info.completed_at < cutoff_time):
+                    upload_info.completed_at < cutoff_time):
 
                 upload_ids_to_remove.append(upload_id)
 
@@ -641,7 +651,7 @@ class UploadManager(IUploadManager, IComponent):
             upload_info = session.get_info()
 
             if (upload_info.status == UploadStatus.FAILED and
-                upload_info.updated_at < cutoff_time):
+                    upload_info.updated_at < cutoff_time):
 
                 # Clean up any temp files
                 await session.cancel()
@@ -664,7 +674,8 @@ class UploadManager(IUploadManager, IComponent):
         ]
 
         total_active_size = sum(info.file_size for info in active_uploads)
-        total_uploaded_size = sum(info.bytes_uploaded for info in active_uploads)
+        total_uploaded_size = sum(
+            info.bytes_uploaded for info in active_uploads)
 
         return {
             **self._stats,
@@ -693,7 +704,7 @@ class UploadManager(IUploadManager, IComponent):
             # Calculate file checksum
             hasher = hashlib.sha256()
 
-            if aiofiles:
+            if AIOFILES_AVAILABLE:
                 async with aiofiles.open(file_path, 'rb') as f:
                     while chunk := await f.read(8192):
                         hasher.update(chunk)
