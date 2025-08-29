@@ -8,7 +8,7 @@ between different parts of the system and external services.
 import time
 import uuid
 from dataclasses import dataclass, field
-from enum import Enum, auto
+from enum import Enum, IntEnum, auto
 from typing import Any, Dict, Optional
 
 
@@ -24,12 +24,12 @@ class MessageType(Enum):
     ERROR = auto()       # Error messages
 
 
-class MessagePriority(Enum):
+class MessagePriority(IntEnum):
     """Message priority levels."""
     LOW = 1
     NORMAL = 2
     HIGH = 3
-    URGENT = 4
+    CRITICAL = 4
 
 
 @dataclass
@@ -80,7 +80,7 @@ class Message:
     def __post_init__(self) -> None:
         """Validate message after creation."""
         if not self.topic:
-            raise ValueError("Message topic cannot be empty")
+            raise ValueError("Topic cannot be empty")
 
         if not isinstance(self.message_type, MessageType):
             raise ValueError("Message type must be a MessageType enum value")

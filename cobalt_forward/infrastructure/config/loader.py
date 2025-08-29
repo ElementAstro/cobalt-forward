@@ -142,8 +142,15 @@ class ConfigLoader:
             f"{self._env_prefix}TCP_HOST": ("tcp.host", str),
             f"{self._env_prefix}TCP_PORT": ("tcp.port", int),
             f"{self._env_prefix}TCP_TIMEOUT": ("tcp.timeout", float),
-            f"{self._env_prefix}WS_HOST": ("websocket.host", str),
-            f"{self._env_prefix}WS_PORT": ("websocket.port", int),
+            f"{self._env_prefix}WEBSOCKET_HOST": ("websocket.host", str),
+            f"{self._env_prefix}WEBSOCKET_PORT": ("websocket.port", int),
+            f"{self._env_prefix}WEBSOCKET_PATH": ("websocket.path", str),
+            f"{self._env_prefix}WEBSOCKET_SSL_ENABLED": ("websocket.ssl_enabled", self._parse_bool),
+            f"{self._env_prefix}WEBSOCKET_MAX_CONNECTIONS": ("websocket.max_connections", int),
+            f"{self._env_prefix}WEBSOCKET_PING_INTERVAL": ("websocket.ping_interval", float),
+            f"{self._env_prefix}WEBSOCKET_PING_TIMEOUT": ("websocket.ping_timeout", float),
+            f"{self._env_prefix}WS_HOST": ("websocket.host", str),  # Keep backward compatibility
+            f"{self._env_prefix}WS_PORT": ("websocket.port", int),  # Keep backward compatibility
             f"{self._env_prefix}SSH_ENABLED": ("ssh.enabled", self._parse_bool),
             f"{self._env_prefix}SSH_HOST": ("ssh.host", str),
             f"{self._env_prefix}SSH_PORT": ("ssh.port", int),
@@ -172,7 +179,13 @@ class ConfigLoader:
 
     def _parse_bool(self, value: str) -> bool:
         """Parse boolean value from string."""
-        return value.lower() in ('true', '1', 'yes', 'on', 'enabled')
+        lower_value = value.lower()
+        if lower_value in ('true', '1', 'yes', 'on', 'enabled'):
+            return True
+        elif lower_value in ('false', '0', 'no', 'off', 'disabled'):
+            return False
+        else:
+            raise ValueError(f"Invalid boolean value: {value}")
 
     def _set_nested_value(self, config: Dict[str, Any], path: str, value: Any) -> None:
         """Set a nested configuration value using dot notation."""

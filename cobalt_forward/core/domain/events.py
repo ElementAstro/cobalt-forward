@@ -8,11 +8,11 @@ for decoupled communication between components.
 import time
 import uuid
 from dataclasses import dataclass, field
-from enum import Enum, auto
+from enum import IntEnum, auto
 from typing import Any, Dict, Optional
 
 
-class EventPriority(Enum):
+class EventPriority(IntEnum):
     """Event priority levels for processing order."""
     LOW = 1
     NORMAL = 2
