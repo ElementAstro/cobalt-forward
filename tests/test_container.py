@@ -16,8 +16,8 @@ class ITestService(Protocol):
     def get_value(self) -> str: ...
 
 
-class TestService:
-    """Test service implementation."""
+class MockService:
+    """Mock service implementation."""
     def __init__(self) -> None:
         self.value = "test"
     
@@ -25,8 +25,8 @@ class TestService:
         return self.value
 
 
-class TestServiceWithDependency:
-    """Test service with dependency."""
+class MockServiceWithDependency:
+    """Mock service with dependency."""
     def __init__(self, dependency: ITestService) -> None:
         self.dependency = dependency
     
@@ -42,7 +42,7 @@ class TestContainer:
         container = Container()
         
         # Register service
-        container.register(ITestService, TestService, ServiceLifetime.SINGLETON)
+        container.register(ITestService, MockService, ServiceLifetime.SINGLETON)
         
         # Resolve service twice
         service1 = container.resolve(ITestService)
@@ -57,7 +57,7 @@ class TestContainer:
         container = Container()
         
         # Register service
-        container.register(ITestService, TestService, ServiceLifetime.TRANSIENT)
+        container.register(ITestService, MockService, ServiceLifetime.TRANSIENT)
         
         # Resolve service twice
         service1 = container.resolve(ITestService)
@@ -71,7 +71,7 @@ class TestContainer:
     def test_register_instance(self):
         """Test instance registration."""
         container = Container()
-        instance = TestService()
+        instance = MockService()
         
         # Register instance
         container.register_instance(ITestService, instance)
@@ -87,11 +87,11 @@ class TestContainer:
         container = Container()
         
         # Register dependencies
-        container.register(ITestService, TestService, ServiceLifetime.SINGLETON)
-        container.register(TestServiceWithDependency, TestServiceWithDependency, ServiceLifetime.SINGLETON)
+        container.register(ITestService, MockService, ServiceLifetime.SINGLETON)
+        container.register(MockServiceWithDependency, MockServiceWithDependency, ServiceLifetime.SINGLETON)
         
         # Resolve service with dependency
-        service = container.resolve(TestServiceWithDependency)
+        service = container.resolve(MockServiceWithDependency)
         
         # Should have dependency injected
         assert service.get_combined_value() == "combined_test"
@@ -118,7 +118,7 @@ class TestContainer:
         assert not container.is_registered(ITestService)
         
         # Register service
-        container.register(ITestService, TestService)
+        container.register(ITestService, MockService)
         
         # Now registered
         assert container.is_registered(ITestService)
@@ -128,7 +128,7 @@ class TestContainer:
         container = Container()
         
         def create_service() -> ITestService:
-            service = TestService()
+            service = MockService()
             service.value = "factory_created"
             return service
         
@@ -149,7 +149,7 @@ class TestContainerAsync:
         container = Container()
         
         # Register service
-        container.register(ITestService, TestService)
+        container.register(ITestService, MockService)
 
         # Resolve and verify
         service = container.resolve(ITestService)
@@ -164,15 +164,15 @@ class TestContainerEdgeCases:
         container = Container()
 
         # Register first implementation
-        container.register(ITestService, TestService, ServiceLifetime.SINGLETON)
+        container.register(ITestService, MockService, ServiceLifetime.SINGLETON)
         service1 = container.resolve(ITestService)
 
         # Register second implementation (should overwrite)
-        class AnotherTestService:
+        class AnotherMockService:
             def get_value(self) -> str:
                 return "another"
 
-        container.register(ITestService, AnotherTestService, ServiceLifetime.SINGLETON)
+        container.register(ITestService, AnotherMockService, ServiceLifetime.SINGLETON)
         service2 = container.resolve(ITestService)
 
         # Should get the new implementation
@@ -205,8 +205,8 @@ class TestContainerEdgeCases:
         """Test registering a factory function."""
         container = Container()
 
-        def create_service() -> TestService:
-            service = TestService()
+        def create_service() -> MockService:
+            service = MockService()
             service.value = "factory_created"
             return service
 
@@ -224,10 +224,10 @@ class TestContainerEdgeCases:
         container = Container()
 
         call_count = 0
-        def create_service() -> TestService:
+        def create_service() -> MockService:
             nonlocal call_count
             call_count += 1
-            service = TestService()
+            service = MockService()
             service.value = f"factory_{call_count}"
             return service
 
@@ -325,7 +325,7 @@ class TestContainerEdgeCases:
         assert service.has_dependency() is False
 
         # Now register the optional dependency
-        container.register(ITestService, TestService)
+        container.register(ITestService, MockService)
 
         # Create new service instance (this would need manual re-creation in real scenario)
         service2 = ServiceWithOptionalDep()
@@ -337,7 +337,7 @@ class TestContainerEdgeCases:
         container2 = Container()
 
         # Register different services in each container
-        container1.register(ITestService, TestService)
+        container1.register(ITestService, MockService)
 
         class AnotherService:
             def get_value(self) -> str:
@@ -354,4 +354,4 @@ class TestContainerEdgeCases:
 
         # Verify one container doesn't affect the other
         assert container1.try_resolve(AnotherService) is None
-        assert container2.try_resolve(TestService) is None
+        assert container2.try_resolve(MockService) is None

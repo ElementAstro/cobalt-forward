@@ -13,12 +13,24 @@ from pathlib import Path
 @dataclass
 class TCPConfig:
     """TCP client configuration."""
-    host: str = "localhost"
+    host: str = "0.0.0.0"
     port: int = 8080
+    enabled: bool = True
+    max_connections: int = 100
     timeout: float = 30.0
     retry_attempts: int = 3
     keepalive: bool = True
     buffer_size: int = 8192
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert configuration to dictionary."""
+        return {k: v for k, v in self.__dict__.items()}
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'TCPConfig':
+        """Create configuration from dictionary."""
+        valid_fields = ['host', 'port', 'enabled', 'max_connections', 'timeout', 'retry_attempts', 'keepalive', 'buffer_size']
+        return cls(**{k: v for k, v in data.items() if k in valid_fields})
 
 
 @dataclass
@@ -47,6 +59,7 @@ class SSHConfig:
     known_hosts_path: Optional[str] = None
     timeout: float = 30.0
     pool_size: int = 5
+    reconnect_interval: int = 5
 
 
 @dataclass
@@ -148,9 +161,8 @@ class ApplicationConfig:
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
+        # Only validate paths on initialization, defer other validations to explicit validate() call
         self._validate_paths()
-        self._validate_ports()
-        self._validate_timeouts()
 
     def _validate_paths(self) -> None:
         """Validate directory paths."""
@@ -180,6 +192,9 @@ class ApplicationConfig:
         ]
 
         for name, port in ports:
+            if not isinstance(port, int):
+                raise ValueError(
+                    f"{name} must be an integer, got {type(port).__name__}: {port}")
             if not (1 <= port <= 65535):
                 raise ValueError(
                     f"{name} must be between 1 and 65535, got {port}")
@@ -197,6 +212,24 @@ class ApplicationConfig:
             if timeout <= 0:
                 raise ValueError(f"{name} must be positive, got {timeout}")
 
+    def validate(self) -> bool:
+        """Validate the entire configuration and return True if valid."""
+        self._validate_paths()
+        self._validate_ports()
+        self._validate_timeouts()
+        
+        # Validate SSL configuration
+        if self.websocket.ssl_enabled:
+            if not self.websocket.ssl_cert_path or not self.websocket.ssl_key_path:
+                raise ValueError("SSL certificate path is required when SSL is enabled")
+        
+        # Validate log level
+        valid_levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+        if self.logging.level.upper() not in valid_levels:
+            raise ValueError(f"Invalid log level: {self.logging.level}")
+        
+        return True
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary."""
         result = {}
@@ -213,16 +246,22 @@ class ApplicationConfig:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ApplicationConfig':
         """Create configuration from dictionary."""
-        # Extract nested configurations
-        tcp_config = TCPConfig(**data.get('tcp', {}))
-        websocket_config = WebSocketConfig(**data.get('websocket', {}))
-        ssh_config = SSHConfig(**data.get('ssh', {}))
-        ftp_config = FTPConfig(**data.get('ftp', {}))
-        mqtt_config = MQTTConfig(**data.get('mqtt', {}))
-        logging_config = LoggingConfig(**data.get('logging', {}))
-        plugin_config = PluginConfig(**data.get('plugins', {}))
-        performance_config = PerformanceConfig(**data.get('performance', {}))
-        security_config = SecurityConfig(**data.get('security', {}))
+        # Extract nested configurations with type checking
+        def safe_get_config(key: str, config_class: type) -> dict:
+            value = data.get(key, {})
+            if not isinstance(value, dict):
+                raise ValueError(f"Configuration section '{key}' must be a dictionary, got {type(value).__name__}")
+            return value
+            
+        tcp_config = TCPConfig(**safe_get_config('tcp', TCPConfig))
+        websocket_config = WebSocketConfig(**safe_get_config('websocket', WebSocketConfig))
+        ssh_config = SSHConfig(**safe_get_config('ssh', SSHConfig))
+        ftp_config = FTPConfig(**safe_get_config('ftp', FTPConfig))
+        mqtt_config = MQTTConfig(**safe_get_config('mqtt', MQTTConfig))
+        logging_config = LoggingConfig(**safe_get_config('logging', LoggingConfig))
+        plugin_config = PluginConfig(**safe_get_config('plugins', PluginConfig))
+        performance_config = PerformanceConfig(**safe_get_config('performance', PerformanceConfig))
+        security_config = SecurityConfig(**safe_get_config('security', SecurityConfig))
 
         # Create main configuration
         return cls(

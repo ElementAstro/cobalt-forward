@@ -238,10 +238,44 @@ class Container(IContainer):
         # If implementation is a class, resolve constructor dependencies
         if inspect.isclass(implementation):
             constructor_args = []
-
-            for dep_type in registration.dependencies:
-                dep_instance = self.resolve(dep_type)
-                constructor_args.append(dep_instance)
+            
+            # Get constructor signature to handle optional parameters
+            constructor = implementation.__init__
+            signature = inspect.signature(constructor)
+            type_hints = get_type_hints(constructor)
+            
+            for param_name, param in signature.parameters.items():
+                if param_name == 'self':
+                    continue
+                    
+                # Handle parameters with default values (optional dependencies)
+                if param.default is not inspect.Parameter.empty:
+                    # Try to resolve the dependency, but use default if not available
+                    if param_name in type_hints:
+                        param_type = type_hints[param_name]
+                        # Handle Optional types
+                        if hasattr(param_type, '__origin__') and param_type.__origin__ is Union:
+                            args = param_type.__args__
+                            if len(args) == 2 and type(None) in args:
+                                non_none_type = next(arg for arg in args if arg is not type(None))
+                                dep_instance = self.try_resolve(non_none_type)
+                                constructor_args.append(dep_instance)  # Could be None
+                                continue
+                        
+                        # Non-optional dependency with default value
+                        dep_instance = self.try_resolve(param_type)
+                        if dep_instance is not None:
+                            constructor_args.append(dep_instance)
+                        else:
+                            constructor_args.append(param.default)
+                    else:
+                        constructor_args.append(param.default)
+                else:
+                    # Required dependency, must be resolved
+                    for dep_type in registration.dependencies:
+                        dep_instance = self.resolve(dep_type)
+                        constructor_args.append(dep_instance)
+                    break  # All required dependencies handled
 
             return implementation(*constructor_args)
 
@@ -264,10 +298,26 @@ class Container(IContainer):
                 if param_name == 'self':
                     continue
 
+                # Skip parameters with default values for Optional types
+                if param.default is not inspect.Parameter.empty:
+                    continue
+
                 # Get parameter type from type hints
                 if param_name in type_hints:
                     param_type = type_hints[param_name]
-                    dependencies.append(param_type)
+                    
+                    # Handle Optional types (Union[T, None])
+                    if hasattr(param_type, '__origin__') and param_type.__origin__ is Union:
+                        args = param_type.__args__
+                        if len(args) == 2 and type(None) in args:
+                            # This is Optional[T], extract the non-None type
+                            non_none_type = next(arg for arg in args if arg is not type(None))
+                            dependencies.append(non_none_type)
+                        else:
+                            # Regular Union type, not Optional
+                            dependencies.append(param_type)
+                    else:
+                        dependencies.append(param_type)
                 elif param.annotation != inspect.Parameter.empty:
                     dependencies.append(param.annotation)
 

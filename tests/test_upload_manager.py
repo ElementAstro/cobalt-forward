@@ -259,6 +259,18 @@ class TestUploadChunkHandling:
     """Test upload chunk handling functionality."""
     
     @pytest.fixture
+    async def upload_manager(self) -> UploadManager:
+        """Create upload manager for testing."""
+        manager = UploadManager(
+            event_bus=None,
+            upload_dir=None,
+            temp_dir=None,
+            chunk_size=1024,
+            max_concurrent_uploads=5
+        )
+        return manager
+    
+    @pytest.fixture
     async def upload_manager_with_upload(self, upload_manager: UploadManager):
         """Create upload manager with a test upload."""
         await upload_manager.start()
@@ -269,6 +281,9 @@ class TestUploadChunkHandling:
             mime_type="text/plain",
             chunk_size=1024
         )
+        
+        # Start the upload session to prepare chunks
+        await upload_manager.start_upload(upload_id)
         
         yield upload_manager, upload_id
         

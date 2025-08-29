@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from typing import Optional, Any
 
+import aiohttp
 import typer
 import uvicorn
 
@@ -171,8 +172,6 @@ def health_check(
     timeout: float = typer.Option(10.0, "--timeout", help="Request timeout")
 ) -> None:
     """Check the health of a running server."""
-
-    import aiohttp
 
     async def check_health() -> bool:
         url = f"http://{host}:{port}/health"

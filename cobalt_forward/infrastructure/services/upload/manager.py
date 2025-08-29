@@ -353,6 +353,42 @@ class UploadManager(IUploadManager, IComponent):
             "average_upload_speed": 0.0
         }
 
+    @property
+    def name(self) -> str:
+        """Get the component name."""
+        return "UploadManager"
+
+    @property
+    def version(self) -> str:
+        """Get the component version."""
+        return "1.0.0"
+
+    async def configure(self, config: Dict[str, Any]) -> None:
+        """Configure the upload manager."""
+        # Update configuration from provided config
+        if 'upload_dir' in config:
+            self._upload_dir = config['upload_dir']
+        if 'temp_dir' in config:
+            self._temp_dir = config['temp_dir']
+        if 'chunk_size' in config:
+            self._chunk_size = config['chunk_size']
+        if 'max_concurrent_uploads' in config:
+            self._max_concurrent_uploads = config['max_concurrent_uploads']
+            self._semaphore = asyncio.Semaphore(self._max_concurrent_uploads)
+
+    async def check_health(self) -> Dict[str, Any]:
+        """Check component health."""
+        return {
+            'healthy': self._running,
+            'status': 'running' if self._running else 'stopped',
+            'details': {
+                'running': self._running,
+                'active_uploads': len(self._active_uploads),
+                'total_uploads': len(self._uploads),
+                'stats': self._stats
+            }
+        }
+
     async def start(self) -> None:
         """Start the upload manager service."""
         if self._running:

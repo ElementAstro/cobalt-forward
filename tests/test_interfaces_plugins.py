@@ -269,6 +269,10 @@ class MockPluginManager(IPluginManager):
         self.get_plugin_called_count += 1
         return self.loaded_plugins.get(plugin_name)
     
+    def get_all_plugins(self) -> Dict[str, IPlugin]:
+        """Get all loaded plugins."""
+        return self.loaded_plugins.copy()
+    
     def list_plugins(self) -> List[str]:
         """List all loaded plugin names."""
         self.list_plugins_called_count += 1

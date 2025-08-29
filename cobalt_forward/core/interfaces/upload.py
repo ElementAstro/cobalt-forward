@@ -96,7 +96,7 @@ class UploadInfo:
     @property
     def is_active(self) -> bool:
         """Check if upload is actively running."""
-        return self.status in (UploadStatus.UPLOADING, UploadStatus.PENDING)
+        return self.status in (UploadStatus.UPLOADING, UploadStatus.PAUSED)
 
 
 class IUploadSession(ABC):

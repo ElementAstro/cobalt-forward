@@ -137,7 +137,7 @@ class TestUploadInfo:
         assert info.updated_at == updated_time
         assert info.completed_at is None
         assert info.user_id is None
-        assert info.metadata is None
+        assert info.metadata == {}
         
         # Progress tracking defaults
         assert info.bytes_uploaded == 0

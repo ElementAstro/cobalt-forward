@@ -60,6 +60,8 @@ class ConfigManager(IComponent):
 
     def __init__(self, initial_config: Dict[str, Any]) -> None:
         self._config = ApplicationConfig.from_dict(initial_config)
+        # Validate the initial configuration
+        self._config.validate()
         self._config_loader = ConfigLoader()
         self._config_file_path: Optional[Path] = None
         self._observers: List[Callable[[ApplicationConfig], None]] = []
@@ -114,8 +116,8 @@ class ConfigManager(IComponent):
 
     async def configure(self, config: Dict[str, Any]) -> None:
         """Configure the component."""
-        # Configuration manager configures itself
-        pass
+        # Update configuration with new values
+        await self.update_config(config)
 
     async def check_health(self) -> Dict[str, Any]:
         """Check component health."""
@@ -144,11 +146,16 @@ class ConfigManager(IComponent):
         logger.info("Enabling configuration hot reload")
 
         try:
+            # Check if the directory exists
+            watch_dir = self._config_file_path.parent
+            if not watch_dir.exists():
+                logger.warning(f"Config file directory does not exist: {watch_dir}")
+                return
+
             self._file_observer = Observer()
             event_handler = ConfigChangeHandler(self)
 
             # Watch the directory containing the config file
-            watch_dir = self._config_file_path.parent
             self._file_observer.schedule(
                 event_handler, str(watch_dir), recursive=False)
             self._file_observer.start()
@@ -158,7 +165,13 @@ class ConfigManager(IComponent):
 
         except Exception as e:
             logger.error(f"Failed to enable hot reload: {e}")
-            raise
+            self._hot_reload_enabled = False
+            if self._file_observer:
+                try:
+                    self._file_observer.stop()
+                    self._file_observer = None
+                except Exception:
+                    pass
 
     async def disable_hot_reload(self) -> None:
         """Disable hot reloading."""
@@ -225,6 +238,7 @@ class ConfigManager(IComponent):
 
             # Create new configuration and validate
             new_config = ApplicationConfig.from_dict(merged_dict)
+            new_config.validate()  # Explicitly validate the new configuration
 
             # Update current configuration
             old_config = self._config

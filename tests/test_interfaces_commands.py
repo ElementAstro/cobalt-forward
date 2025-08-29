@@ -12,14 +12,14 @@ from cobalt_forward.core.interfaces.commands import ICommandHandler, ICommandDis
 from cobalt_forward.core.domain.commands import Command, CommandResult, CommandStatus, CommandType
 
 
-class TestCommand(Command[Dict[str, Any]]):
+class MockTestCommand(Command[Dict[str, Any]]):
     """Test command implementation."""
     
     def __init__(self, data: Dict[str, Any], name: str = "test.command"):
         super().__init__(name=name, data=data)
 
 
-class AnotherTestCommand(Command[str]):
+class AnotherMockTestCommand(Command[str]):
     """Another test command implementation."""
     
     def __init__(self, data: str, name: str = "another.command"):
@@ -30,7 +30,7 @@ class MockCommandHandler(ICommandHandler[Dict[str, Any], str]):
     """Mock implementation of ICommandHandler for testing."""
     
     def __init__(self, supported_commands: List[Type[Command[Any]]] = None):
-        self._supported_commands = supported_commands or [TestCommand]
+        self._supported_commands = supported_commands or [MockTestCommand]
         self.handled_commands: List[Command[Any]] = []
         self.handle_called_count = 0
         self.can_handle_called_count = 0
@@ -149,17 +149,17 @@ class TestICommandHandler:
         return MockCommandHandler()
     
     @pytest.fixture
-    def test_command(self) -> TestCommand:
+    def test_command(self) -> MockTestCommand:
         """Create a test command."""
-        return TestCommand(data={"action": "test", "value": 42})
+        return MockTestCommand(data={"action": "test", "value": 42})
     
     @pytest.fixture
-    def another_command(self) -> AnotherTestCommand:
+    def another_command(self) -> AnotherMockTestCommand:
         """Create another test command."""
-        return AnotherTestCommand(data="test data")
+        return AnotherMockTestCommand(data="test data")
     
     @pytest.mark.asyncio
-    async def test_handle_method_exists(self, command_handler: MockCommandHandler, test_command: TestCommand) -> None:
+    async def test_handle_method_exists(self, command_handler: MockCommandHandler, test_command: MockTestCommand) -> None:
         """Test that handle method exists and can be called."""
         assert hasattr(command_handler, 'handle')
         assert callable(command_handler.handle)
@@ -173,7 +173,7 @@ class TestICommandHandler:
         assert command_handler.handled_commands[0] == test_command
     
     @pytest.mark.asyncio
-    async def test_handle_success_result(self, command_handler: MockCommandHandler, test_command: TestCommand) -> None:
+    async def test_handle_success_result(self, command_handler: MockCommandHandler, test_command: MockTestCommand) -> None:
         """Test handling command with success result."""
         command_handler.result_to_return = "success_result"
         
@@ -186,7 +186,7 @@ class TestICommandHandler:
         assert result.error is None
     
     @pytest.mark.asyncio
-    async def test_handle_failure_result(self, command_handler: MockCommandHandler, test_command: TestCommand) -> None:
+    async def test_handle_failure_result(self, command_handler: MockCommandHandler, test_command: MockTestCommand) -> None:
         """Test handling command with failure result."""
         command_handler.should_fail = True
         
@@ -198,7 +198,7 @@ class TestICommandHandler:
         assert result.result is None
         assert result.error == "Mock handler failure"
     
-    def test_can_handle_method_exists(self, command_handler: MockCommandHandler, test_command: TestCommand) -> None:
+    def test_can_handle_method_exists(self, command_handler: MockCommandHandler, test_command: MockTestCommand) -> None:
         """Test that can_handle method exists and can be called."""
         assert hasattr(command_handler, 'can_handle')
         assert callable(command_handler.can_handle)
@@ -208,17 +208,17 @@ class TestICommandHandler:
         assert isinstance(result, bool)
         assert command_handler.can_handle_called_count == 1
     
-    def test_can_handle_supported_command(self, command_handler: MockCommandHandler, test_command: TestCommand) -> None:
+    def test_can_handle_supported_command(self, command_handler: MockCommandHandler, test_command: MockTestCommand) -> None:
         """Test can_handle returns True for supported command."""
         result = command_handler.can_handle(test_command)
         assert result is True
     
-    def test_can_handle_unsupported_command(self, command_handler: MockCommandHandler, another_command: AnotherTestCommand) -> None:
+    def test_can_handle_unsupported_command(self, command_handler: MockCommandHandler, another_command: AnotherMockTestCommand) -> None:
         """Test can_handle returns False for unsupported command."""
         result = command_handler.can_handle(another_command)
         assert result is False
     
-    def test_can_handle_when_disabled(self, command_handler: MockCommandHandler, test_command: TestCommand) -> None:
+    def test_can_handle_when_disabled(self, command_handler: MockCommandHandler, test_command: MockTestCommand) -> None:
         """Test can_handle returns False when handler is disabled."""
         command_handler.should_handle = False
         
@@ -232,26 +232,26 @@ class TestICommandHandler:
         supported = command_handler.supported_commands
         
         assert isinstance(supported, list)
-        assert TestCommand in supported
+        assert MockTestCommand in supported
         assert len(supported) == 1
     
     def test_supported_commands_multiple_types(self) -> None:
         """Test handler with multiple supported command types."""
-        handler = MockCommandHandler([TestCommand, AnotherTestCommand])
+        handler = MockCommandHandler([MockTestCommand, AnotherMockTestCommand])
         
         supported = handler.supported_commands
         
         assert len(supported) == 2
-        assert TestCommand in supported
-        assert AnotherTestCommand in supported
+        assert MockTestCommand in supported
+        assert AnotherMockTestCommand in supported
     
     @pytest.mark.asyncio
     async def test_handle_multiple_commands(self, command_handler: MockCommandHandler) -> None:
         """Test handling multiple commands."""
         commands = [
-            TestCommand({"id": 1}),
-            TestCommand({"id": 2}),
-            TestCommand({"id": 3})
+            MockTestCommand({"id": 1}),
+            MockTestCommand({"id": 2}),
+            MockTestCommand({"id": 3})
         ]
         
         results = []
@@ -282,12 +282,12 @@ class TestICommandDispatcher:
         return MockCommandHandler()
     
     @pytest.fixture
-    def test_command(self) -> TestCommand:
+    def test_command(self) -> MockTestCommand:
         """Create a test command."""
-        return TestCommand(data={"action": "dispatch_test"})
+        return MockTestCommand(data={"action": "dispatch_test"})
     
     @pytest.mark.asyncio
-    async def test_dispatch_method_exists(self, command_dispatcher: MockCommandDispatcher, test_command: TestCommand) -> None:
+    async def test_dispatch_method_exists(self, command_dispatcher: MockCommandDispatcher, test_command: MockTestCommand) -> None:
         """Test that dispatch method exists and can be called."""
         assert hasattr(command_dispatcher, 'dispatch')
         assert callable(command_dispatcher.dispatch)
@@ -301,7 +301,7 @@ class TestICommandDispatcher:
     
     @pytest.mark.asyncio
     async def test_dispatch_with_handler(self, command_dispatcher: MockCommandDispatcher, 
-                                        command_handler: MockCommandHandler, test_command: TestCommand) -> None:
+                                        command_handler: MockCommandHandler, test_command: MockTestCommand) -> None:
         """Test dispatching command with registered handler."""
         await command_dispatcher.register_handler(command_handler)
         
@@ -313,7 +313,7 @@ class TestICommandDispatcher:
         assert command_dispatcher.metrics['commands_completed'] == 1
     
     @pytest.mark.asyncio
-    async def test_dispatch_no_handler(self, command_dispatcher: MockCommandDispatcher, test_command: TestCommand) -> None:
+    async def test_dispatch_no_handler(self, command_dispatcher: MockCommandDispatcher, test_command: MockTestCommand) -> None:
         """Test dispatching command with no registered handler."""
         result = await command_dispatcher.dispatch(test_command)
         
@@ -322,7 +322,7 @@ class TestICommandDispatcher:
         assert command_dispatcher.metrics['commands_failed'] == 1
     
     @pytest.mark.asyncio
-    async def test_dispatch_failure(self, command_dispatcher: MockCommandDispatcher, test_command: TestCommand) -> None:
+    async def test_dispatch_failure(self, command_dispatcher: MockCommandDispatcher, test_command: MockTestCommand) -> None:
         """Test dispatch failure."""
         command_dispatcher.should_fail_dispatch = True
         
@@ -347,8 +347,8 @@ class TestICommandDispatcher:
     @pytest.mark.asyncio
     async def test_register_multiple_handlers(self, command_dispatcher: MockCommandDispatcher) -> None:
         """Test registering multiple handlers."""
-        handler1 = MockCommandHandler([TestCommand])
-        handler2 = MockCommandHandler([AnotherTestCommand])
+        handler1 = MockCommandHandler([MockTestCommand])
+        handler2 = MockCommandHandler([AnotherMockTestCommand])
 
         await command_dispatcher.register_handler(handler1)
         await command_dispatcher.register_handler(handler2)
@@ -390,23 +390,23 @@ class TestICommandDispatcher:
         assert hasattr(command_dispatcher, 'get_handlers')
         assert callable(command_dispatcher.get_handlers)
 
-        handler1 = MockCommandHandler([TestCommand])
-        handler2 = MockCommandHandler([AnotherTestCommand])
-        handler3 = MockCommandHandler([TestCommand, AnotherTestCommand])
+        handler1 = MockCommandHandler([MockTestCommand])
+        handler2 = MockCommandHandler([AnotherMockTestCommand])
+        handler3 = MockCommandHandler([MockTestCommand, AnotherMockTestCommand])
 
         await command_dispatcher.register_handler(handler1)
         await command_dispatcher.register_handler(handler2)
         await command_dispatcher.register_handler(handler3)
 
-        # Get handlers for TestCommand
-        test_handlers = await command_dispatcher.get_handlers(TestCommand)
+        # Get handlers for MockTestCommand
+        test_handlers = await command_dispatcher.get_handlers(MockTestCommand)
         assert len(test_handlers) == 2
         assert handler1 in test_handlers
         assert handler3 in test_handlers
         assert handler2 not in test_handlers
 
-        # Get handlers for AnotherTestCommand
-        another_handlers = await command_dispatcher.get_handlers(AnotherTestCommand)
+        # Get handlers for AnotherMockTestCommand
+        another_handlers = await command_dispatcher.get_handlers(AnotherMockTestCommand)
         assert len(another_handlers) == 2
         assert handler2 in another_handlers
         assert handler3 in another_handlers
@@ -417,12 +417,12 @@ class TestICommandDispatcher:
     @pytest.mark.asyncio
     async def test_get_handlers_no_matches(self, command_dispatcher: MockCommandDispatcher) -> None:
         """Test getting handlers when no handlers match the command type."""
-        # Register handler for TestCommand
-        handler = MockCommandHandler([TestCommand])
+        # Register handler for MockTestCommand
+        handler = MockCommandHandler([MockTestCommand])
         await command_dispatcher.register_handler(handler)
 
-        # Try to get handlers for AnotherTestCommand
-        handlers = await command_dispatcher.get_handlers(AnotherTestCommand)
+        # Try to get handlers for AnotherMockTestCommand
+        handlers = await command_dispatcher.get_handlers(AnotherMockTestCommand)
 
         assert len(handlers) == 0
         assert isinstance(handlers, list)
@@ -451,7 +451,7 @@ class TestICommandDispatcher:
 
     @pytest.mark.asyncio
     async def test_metrics_updated_after_operations(self, command_dispatcher: MockCommandDispatcher,
-                                                   command_handler: MockCommandHandler, test_command: TestCommand) -> None:
+                                                   command_handler: MockCommandHandler, test_command: MockTestCommand) -> None:
         """Test that metrics are updated after operations."""
         # Register handler and dispatch command
         await command_dispatcher.register_handler(command_handler)

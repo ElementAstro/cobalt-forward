@@ -19,6 +19,7 @@ dependencies = [
     "asyncio>=3.4.3",
     "aiohttp>=3.9.1",
     "cryptography>=45.0.6",
+    "prompt-toolkit>=3.0.52",
 ]
 
 [project.optional-dependencies]
@@ -120,5 +121,11 @@ isort = "^5.9.3"
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
+    "pytest>=8.4.1",
+    "pytest-asyncio>=1.1.0",
+    "pytest-cov>=6.2.1",
+    "types-aiofiles>=24.1.0.20250822",
     "types-pyyaml>=6.0.12.20250822",
+    "watchdog>=6.0.0",
 ]

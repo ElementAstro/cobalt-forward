@@ -295,6 +295,32 @@ class SSHForwarder(ISSHForwarder, IComponent):
         self._running = False
         self._reconnect_tasks: Dict[str, asyncio.Task[None]] = {}
 
+    @property
+    def name(self) -> str:
+        """Get the component name."""
+        return "SSHForwarder"
+
+    @property
+    def version(self) -> str:
+        """Get the component version."""
+        return "1.0.0"
+
+    async def configure(self, config: Dict[str, Any]) -> None:
+        """Configure the SSH forwarder."""
+        # Update configuration from provided config
+        if 'reconnect_interval' in config:
+            self._reconnect_interval = config['reconnect_interval']
+        if 'max_reconnect_attempts' in config:
+            self._max_reconnect_attempts = config['max_reconnect_attempts']
+        if 'known_hosts_path' in config:
+            self._known_hosts_path = config['known_hosts_path']
+        if 'keys_path' in config:
+            self._keys_path = config['keys_path']
+
+    async def check_health(self) -> Dict[str, Any]:
+        """Check component health."""
+        return await self.health_check()
+
     async def start(self) -> None:
         """Start the SSH forwarder service."""
         if self._running:

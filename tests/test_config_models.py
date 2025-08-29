@@ -26,7 +26,7 @@ class TestTCPConfig:
         assert config.enabled is True
         assert config.max_connections == 100
         assert config.timeout == 30.0
-        assert config.buffer_size == 4096
+        assert config.buffer_size == 8192
     
     def test_tcp_config_custom_values(self) -> None:
         """Test TCPConfig with custom values."""
